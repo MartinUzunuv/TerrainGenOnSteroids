@@ -2,7 +2,8 @@
 (function () {
   'use strict';
 
-  const { compileRules, Solver, seedFromString, makeRng } = window.TerrainWFC;
+  const { compileRules, Solver, seedFromString, makeRng, neighborSteps } = window.TerrainWFC;
+  const RADIUS_STEPS = neighborSteps(5); // 4, 8, 12, 20, 24, 28, … neighbours
 
   const $ = (id) => document.getElementById(id);
   const ui = {
@@ -11,12 +12,18 @@
     generate: $('generate'),
     pause: $('pause'),
     step: $('step'),
+    cleanup: $('cleanup'),
+    cleanupPasses: $('cleanupPasses'),
     stats: $('stats'),
     width: $('width'),
     height: $('height'),
     cellSize: $('cellSize'),
     selection: $('selection'),
-    neighborhood: $('neighborhood'),
+    radius: $('radius'),
+    radiusOut: $('radiusOut'),
+    stability: $('stability'),
+    stabilityStrength: $('stabilityStrength'),
+    stabilityOut: $('stabilityOut'),
     seed: $('seed'),
     speed: $('speed'),
     speedOut: $('speedOut'),
@@ -58,6 +65,7 @@
   let offsets = null; // per cell: random direction in [-1, 1]², scaled by the offset slider
   let vor = null; // Voronoi pixel map, or null when drawing plain squares
   let vorRebuild = 0;
+  let autoCleaned = false; // whether this map already got its automatic cleanup passes
 
   // ---- colours --------------------------------------------------------------
 
@@ -263,12 +271,14 @@
     solver = new Solver(rules, {
       width,
       height,
-      neighborhood: Number(ui.neighborhood.value),
+      radius2: RADIUS_STEPS[Number(ui.radius.value)].radius2,
+      stability: ui.stability.checked ? stabilityStrength() : 0,
       selection: ui.selection.value,
       seed: seedUsed,
     });
     solveMs = performance.now() - t0;
     paused = false;
+    autoCleaned = false;
 
     // Point offsets come from the seed too, so the same seed gives the same picture.
     const rng = makeRng(seedUsed ^ 0x9e3779b9);
@@ -388,6 +398,7 @@
       }
       solveMs += performance.now() - t0;
     }
+    autoCleanup();
     draw();
     if (!paused && solver.status === 'running') schedule();
   }
@@ -399,6 +410,23 @@
     const t0 = performance.now();
     solver.step();
     solveMs += performance.now() - t0;
+    autoCleanup();
+    draw();
+  }
+
+  // Runs the configured number of cleanup passes once, right after the map finishes.
+  function autoCleanup() {
+    if (autoCleaned || solver.status !== 'done') return;
+    autoCleaned = true;
+    const passes = readInt(ui.cleanupPasses, 0, 50, 2);
+    for (let i = 0; i < passes; i++) {
+      if (solver.cleanup() === 0) break; // nothing left to clean
+    }
+  }
+
+  function cleanupOnce() {
+    if (!solver || solver.status !== 'done') return;
+    solver.cleanup();
     draw();
   }
 
@@ -440,6 +468,7 @@
     ui.pause.disabled = !running;
     ui.step.disabled = !running;
     ui.pause.textContent = paused && running ? 'Resume' : 'Pause';
+    ui.cleanup.disabled = s.status !== 'done';
 
     const counts = new Uint32Array(rules.types.length);
     for (let c = 0; c < s.N; c++) {
@@ -458,6 +487,7 @@
       ['Settled', `${fmt(s.settled)} / ${fmt(s.N)} (${Math.floor((s.settled / s.N) * 100)}%)`],
       ['Random picks', fmt(s.steps)],
       ['Backtracks', s.repairs ? `${fmt(s.backtracks)} (${fmt(s.repairs)} repairs)` : fmt(s.backtracks)],
+      ['Cleaned up', `${fmt(s.cleaned)} cells`],
       ['Seed', String(seedUsed)],
       ['Solve time', `${(solveMs / 1000).toFixed(2)} s`],
     ];
@@ -536,6 +566,7 @@
   ui.generate.addEventListener('click', generate);
   ui.pause.addEventListener('click', togglePause);
   ui.step.addEventListener('click', stepOnce);
+  ui.cleanup.addEventListener('click', cleanupOnce);
   ui.speed.addEventListener('input', updateSpeedLabel);
   ui.instant.addEventListener('change', () => {
     updateSpeedLabel();
@@ -561,9 +592,39 @@
       });
     }
   });
-  for (const el of [ui.width, ui.height, ui.selection, ui.neighborhood, ui.seed]) {
+  for (const el of [ui.width, ui.height, ui.selection, ui.radius, ui.stabilityStrength, ui.seed]) {
     el.addEventListener('change', generate);
   }
+
+  // The slider runs 0–300 on a square curve, so the low strengths where most of the change
+  // happens get most of its length: position 30 → 3, 55 → 10, 300 → 300.
+  function stabilityStrength() {
+    const p = Number(ui.stabilityStrength.value);
+    const s = (p * p) / 300;
+    return s < 10 ? Math.round(s * 10) / 10 : Math.round(s);
+  }
+
+  function updateStabilityLabel() {
+    const s = stabilityStrength();
+    ui.stabilityStrength.disabled = !ui.stability.checked;
+    const factor = Math.exp(s);
+    const shown = factor < 1e6 ? Math.round(factor).toLocaleString('en-US') : `10^${Math.floor(s / Math.LN10)}`;
+    ui.stabilityOut.textContent = `${s} · up to ×${shown}`;
+    ui.stabilityOut.title = `A type gets up to ${shown}× its weight when every settled neighbour already has it`;
+  }
+  ui.stabilityStrength.addEventListener('input', updateStabilityLabel);
+  ui.stability.addEventListener('change', () => {
+    updateStabilityLabel();
+    generate();
+  });
+
+  function updateRadiusLabel() {
+    const { radius2, count } = RADIUS_STEPS[Number(ui.radius.value)];
+    const r = Math.sqrt(radius2);
+    ui.radiusOut.textContent = `${Number.isInteger(r) ? r : r.toFixed(2)} · ${count} cells`;
+  }
+  ui.radius.max = RADIUS_STEPS.length - 1;
+  ui.radius.addEventListener('input', updateRadiusLabel);
 
   ui.addType.addEventListener('click', () => editor.addType());
 
@@ -618,6 +679,7 @@
     if (t.closest && t.closest('input, textarea, select')) return;
     if (e.key === 'g' || e.key === 'G') generate();
     else if (e.key === 's' || e.key === 'S') stepOnce();
+    else if (e.key === 'c' || e.key === 'C') cleanupOnce();
     else if (e.key === ' ' && !(t.closest && t.closest('button, summary, label'))) {
       e.preventDefault();
       togglePause();
@@ -628,6 +690,8 @@
 
   updateSpeedLabel();
   updateJitterLabel();
+  updateRadiusLabel();
+  updateStabilityLabel();
   let saved = null;
   try {
     saved = JSON.parse(localStorage.getItem(STORAGE_KEY));

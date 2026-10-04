@@ -11,8 +11,29 @@
   'use strict';
 
   const MAX_TYPES = 32; // one bit per type in a Uint32
-  const DIRS_4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-  const DIRS_8 = DIRS_4.concat([[1, 1], [1, -1], [-1, 1], [-1, -1]]);
+
+  // Every [dx, dy] with 0 < dx² + dy² <= radius2.
+  function neighborOffsets(radius2) {
+    const r2 = Math.max(1, Math.floor(radius2) || 1);
+    const r = Math.floor(Math.sqrt(r2));
+    const out = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if ((dx || dy) && dx * dx + dy * dy <= r2) out.push([dx, dy]);
+      }
+    }
+    return out;
+  }
+
+  // The distinct neighbourhood sizes up to a radius: [{ radius2, count }], e.g. 1→4, 2→8, 4→12, 5→20.
+  function neighborSteps(maxRadius) {
+    const steps = [];
+    for (let r2 = 1; r2 <= maxRadius * maxRadius; r2++) {
+      const count = neighborOffsets(r2).length;
+      if (!steps.length || count > steps[steps.length - 1].count) steps.push({ radius2: r2, count });
+    }
+    return steps;
+  }
 
   function popcount(m) {
     m = m - ((m >>> 1) & 0x55555555);
@@ -115,7 +136,9 @@
   }
 
   class Solver {
-    // opts: { width, height, neighborhood: 4|8, selection: 'random'|'entropy', seed }
+    // opts: { width, height, radius2, selection: 'random'|'entropy', stability, seed }
+    // radius2: neighbours are the cells with dx² + dy² <= radius2 (1 → 4 cells, 2 → 8, 4 → 12, …)
+    // stability: how strongly a cell copies its settled neighbours (0 = off), see optionsFor
     constructor(rules, opts) {
       this.rules = rules;
       this.T = rules.types.length;
@@ -126,19 +149,12 @@
       this.rng = makeRng(opts.seed);
       this.full = this.T === 32 ? 0xffffffff : 2 ** this.T - 1;
 
-      const dirs = opts.neighborhood === 4 ? DIRS_4 : DIRS_8;
-      this.D = dirs.length;
-      this.nbr = new Int32Array(this.N * this.D); // -1 = off the map
-      for (let y = 0; y < this.H; y++) {
-        for (let x = 0; x < this.W; x++) {
-          const base = (y * this.W + x) * this.D;
-          dirs.forEach(([dx, dy], k) => {
-            const nx = x + dx;
-            const ny = y + dy;
-            this.nbr[base + k] = nx >= 0 && ny >= 0 && nx < this.W && ny < this.H ? ny * this.W + nx : -1;
-          });
-        }
-      }
+      const offsets = neighborOffsets(opts.radius2);
+      this.DX = Int32Array.from(offsets, (o) => o[0]);
+      this.DY = Int32Array.from(offsets, (o) => o[1]);
+      this.D = offsets.length;
+      this.stability = Math.max(0, Number(opts.stability) || 0);
+      this.nearCounts = new Int32Array(this.T);
 
       this.dom = new Uint32Array(this.N);
       this.locked = new Uint8Array(this.N); // 1 = type was picked at random (not forced by neighbours)
@@ -160,6 +176,7 @@
       this.steps = 0; // random picks (cells settled by their neighbours don't count)
       this.backtracks = 0;
       this.repairs = 0;
+      this.cleaned = 0; // cells changed by cleanup passes
       this.maxRepairs = Math.max(2000, this.N);
       this.lastRepair = -1;
       this.lastRadius = 2;
@@ -215,15 +232,24 @@
 
     // The types a cell can still become, with the weights it would roll with right now.
     optionsFor(c) {
-      const { T, dom, nbr, D } = this;
+      const { T, dom, D, DX, DY, W, H, stability, nearCounts } = this;
       const { weight, near } = this.rules;
+      const x = c % W;
+      const y = (c / W) | 0;
 
       let nearMask = 0; // types of the settled neighbours
+      let settled = 0;
+      nearCounts.fill(0); // how many settled neighbours have each type
       for (let k = 0; k < D; k++) {
-        const n = nbr[c * D + k];
-        if (n < 0) continue;
-        const nm = dom[n];
-        if (nm !== 0 && (nm & (nm - 1)) === 0) nearMask |= nm;
+        const nx = x + DX[k];
+        const ny = y + DY[k];
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        const nm = dom[ny * W + nx];
+        if (nm !== 0 && (nm & (nm - 1)) === 0) {
+          nearMask |= nm;
+          nearCounts[31 - Math.clz32(nm)]++;
+          settled++;
+        }
       }
 
       const m = dom[c];
@@ -241,7 +267,12 @@
             }
           }
         }
-        out.push({ type: t, weight: boosted >= 0 ? boosted : weight[t] });
+        let w = boosted >= 0 ? boosted : weight[t];
+        // Stability: the more settled neighbours already have this type, the likelier it gets.
+        // The weight is multiplied by e^(stability × share of settled neighbours with this type),
+        // so at full agreement strength 3 gives ×20 and strength 10 gives ×22 000.
+        if (stability > 0 && settled > 0) w *= Math.exp((stability * nearCounts[t]) / settled);
+        out.push({ type: t, weight: w });
       }
       return out;
     }
@@ -255,6 +286,58 @@
         fn(c, this.dom[c]);
       }
       list.length = 0;
+    }
+
+    // One cleanup pass over a finished map. A cell whose type is rare around it (at most a quarter
+    // of its neighbours share it) switches to the type that makes up at least half of its
+    // neighbours, but only if that type is allowed next to all of them, so the rules still hold.
+    // Cells are visited in random order and see earlier changes. Returns how many cells changed.
+    cleanup() {
+      if (this.status !== 'done') return 0;
+      const { N, W, H, D, DX, DY, T, dom, nearCounts, rng } = this;
+      const allowed = this.rules.allowed;
+
+      const order = new Int32Array(N);
+      for (let i = 0; i < N; i++) order[i] = i;
+      for (let i = N - 1; i > 0; i--) {
+        const j = (rng() * (i + 1)) | 0;
+        const tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+      }
+
+      let changed = 0;
+      for (let i = 0; i < N; i++) {
+        const c = order[i];
+        const t = this.typeAt(c);
+        const x = c % W;
+        const y = (c / W) | 0;
+        nearCounts.fill(0);
+        let total = 0;
+        let around = 0; // mask of every type next to this cell
+        for (let k = 0; k < D; k++) {
+          const nx = x + DX[k];
+          const ny = y + DY[k];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const m = dom[ny * W + nx];
+          around = (around | m) >>> 0;
+          nearCounts[31 - Math.clz32(m)]++;
+          total++;
+        }
+        if (total === 0 || nearCounts[t] * 4 > total) continue;
+
+        let best = -1;
+        for (let u = 0; u < T; u++) {
+          if (u === t || (best >= 0 && nearCounts[u] <= nearCounts[best])) continue;
+          if (((allowed[u] & around) >>> 0) === around) best = u;
+        }
+        if (best >= 0 && nearCounts[best] * 2 >= total) {
+          this._write(c, bit(best));
+          changed++;
+        }
+      }
+      this.cleaned += changed;
+      return changed;
     }
 
     // Forces a full redraw on the next consumeDirty (e.g. after a colour change).
@@ -348,7 +431,7 @@
     // cells never change), so nothing beyond that region needs recomputing. Locked cells on its
     // border are queued so their constraints flow back in.
     _relaxConnected(x0, y0, x1, y1) {
-      const { seen, stack, nbr, D, locked, dom, full } = this;
+      const { seen, stack, D, DX, DY, W, H, locked, dom, full } = this;
       const stamp = ++this.stamp;
       let sp = 0;
       for (let y = y0; y <= y1; y++) {
@@ -363,10 +446,14 @@
         this._enqueue(c);
         if (locked[c]) continue;
         if (dom[c] !== full) this._write(c, full);
-        const base = c * D;
+        const x = c % W;
+        const y = (c / W) | 0;
         for (let k = 0; k < D; k++) {
-          const n = nbr[base + k];
-          if (n >= 0 && seen[n] !== stamp) {
+          const nx = x + DX[k];
+          const ny = y + DY[k];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const n = ny * W + nx;
+          if (seen[n] !== stamp) {
             seen[n] = stamp;
             stack[sp++] = n;
           }
@@ -441,15 +528,18 @@
 
     // Spreads restrictions outward until nothing changes. Returns false on contradiction.
     _propagate() {
-      const { dom, nbr, D, queue, inQueue } = this;
+      const { dom, D, DX, DY, W, H, queue, inQueue } = this;
       while (this.qLen > 0) {
         const c = queue[--this.qLen];
         inQueue[c] = 0;
         const compat = this._compat(dom[c]);
-        const base = c * D;
+        const x = c % W;
+        const y = (c / W) | 0;
         for (let k = 0; k < D; k++) {
-          const n = nbr[base + k];
-          if (n < 0) continue;
+          const nx = x + DX[k];
+          const ny = y + DY[k];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const n = ny * W + nx;
           const m = dom[n];
           const m2 = (m & compat) >>> 0;
           if (m2 === m) continue;
@@ -500,5 +590,5 @@
     }
   }
 
-  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, MAX_TYPES };
+  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, neighborSteps, MAX_TYPES };
 })(typeof window !== 'undefined' ? window : globalThis);
