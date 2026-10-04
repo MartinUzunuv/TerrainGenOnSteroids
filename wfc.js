@@ -11,6 +11,8 @@
   'use strict';
 
   const MAX_TYPES = 32; // one bit per type in a Uint32
+  const CONTINENTS = ['water', 'land', 'mountain'];
+  const CONTINENT_ODDS = [0.4, 0.4, 0.2]; // how often a continental point is water / land / mountain
 
   // Every [dx, dy] with 0 < dx² + dy² <= radius2.
   function neighborOffsets(radius2) {
@@ -96,6 +98,7 @@
 
     const allowed = new Uint32Array(T); // allowed[t] = mask of types that may sit next to t
     const weight = new Float64Array(T);
+    const continent = new Int8Array(T).fill(-1); // index into CONTINENTS, -1 = none
     const near = new Float64Array(T * T).fill(NaN); // near[t*T + n] = weight of t when next to n
 
     const types = defs.map((d, i) => {
@@ -124,21 +127,30 @@
         }
       }
 
+      if (d.continent !== undefined && d.continent !== null && d.continent !== '' && d.continent !== 'none') {
+        continent[i] = CONTINENTS.indexOf(String(d.continent).toLowerCase());
+        if (continent[i] < 0) {
+          throw new Error(`"${id}".continent must be one of ${CONTINENTS.join(', ')} (or left out).`);
+        }
+      }
+
       return {
         id,
         name: d.name !== undefined ? String(d.name) : id,
         color: d.color !== undefined ? String(d.color) : '#ff00ff',
         weight: w,
+        continent: continent[i] >= 0 ? CONTINENTS[continent[i]] : '',
       };
     });
 
-    return { types, allowed, weight, near };
+    return { types, allowed, weight, near, continent };
   }
 
   class Solver {
-    // opts: { width, height, radius2, selection: 'random'|'entropy', stability, seed }
+    // opts: { width, height, radius2, selection: 'random'|'entropy', stability, continents, seed }
     // radius2: neighbours are the cells with dx² + dy² <= radius2 (1 → 4 cells, 2 → 8, 4 → 12, …)
     // stability: how strongly a cell copies its settled neighbours (0 = off), see optionsFor
+    // continents: { count, strength } for the continental layer, or null for off
     constructor(rules, opts) {
       this.rules = rules;
       this.T = rules.types.length;
@@ -155,6 +167,7 @@
       this.D = offsets.length;
       this.stability = Math.max(0, Number(opts.stability) || 0);
       this.nearCounts = new Int32Array(this.T);
+      this._buildContinents(opts.continents, opts.seed);
 
       this.dom = new Uint32Array(this.N);
       this.locked = new Uint8Array(this.N); // 1 = type was picked at random (not forced by neighbours)
@@ -232,7 +245,7 @@
 
     // The types a cell can still become, with the weights it would roll with right now.
     optionsFor(c) {
-      const { T, dom, D, DX, DY, W, H, stability, nearCounts } = this;
+      const { T, dom, D, DX, DY, W, H, stability, nearCounts, contShare, contStrength, contNeutral } = this;
       const { weight, near } = this.rules;
       const x = c % W;
       const y = (c / W) | 0;
@@ -268,6 +281,11 @@
           }
         }
         let w = boosted >= 0 ? boosted : weight[t];
+        // Continental layer: favour the types that belong to the kind of land this cell is in.
+        if (contShare) {
+          const k = this.rules.continent[t];
+          w *= k >= 0 ? Math.exp(contStrength * contShare[c * 3 + k]) : contNeutral;
+        }
         // Stability: the more settled neighbours already have this type, the likelier it gets.
         // The weight is multiplied by e^(stability × share of settled neighbours with this type),
         // so at full agreement strength 3 gives ×20 and strength 10 gives ×22 000.
@@ -354,6 +372,48 @@
     }
 
     // ---- internals --------------------------------------------------------
+
+    // Continental layer: a few random points, each water, land or mountain. Every cell gets a share
+    // of each kind, weighting the points by inverse square distance, so a cell right next to a water
+    // point is ~100% water and one halfway between a water and a land point is 50/50. optionsFor
+    // multiplies a type's weight by e^(strength × share of its kind); types without a kind get the
+    // average boost e^(strength / 3), so they stay equally likely everywhere.
+    _buildContinents(cont, seed) {
+      this.contShare = null;
+      this.contPoints = [];
+      const count = cont ? Math.floor(cont.count) : 0;
+      const strength = cont ? Number(cont.strength) : 0;
+      if (!(count > 0 && strength > 0)) return;
+
+      const { W, H, N } = this;
+      const rng = makeRng((seed ^ 0x5bd1e995) >>> 0);
+      for (let i = 0; i < count; i++) {
+        let kind = i; // the first three cover every kind once, the rest are random
+        if (i >= CONTINENTS.length) {
+          const r = rng();
+          kind = r < CONTINENT_ODDS[0] ? 0 : r < CONTINENT_ODDS[0] + CONTINENT_ODDS[1] ? 1 : 2;
+        }
+        this.contPoints.push({ x: rng() * W, y: rng() * H, kind: CONTINENTS[kind], k: kind });
+      }
+
+      const share = new Float32Array(N * 3);
+      const sums = new Float64Array(3);
+      for (let c = 0; c < N; c++) {
+        const x = (c % W) + 0.5;
+        const y = ((c / W) | 0) + 0.5;
+        sums.fill(0);
+        for (const p of this.contPoints) {
+          const dx = p.x - x;
+          const dy = p.y - y;
+          sums[p.k] += 1 / (dx * dx + dy * dy + 1);
+        }
+        const total = sums[0] + sums[1] + sums[2];
+        for (let k = 0; k < 3; k++) share[c * 3 + k] = sums[k] / total;
+      }
+      this.contShare = share;
+      this.contStrength = strength;
+      this.contNeutral = Math.exp(strength / 3);
+    }
 
     // Everything back into full superposition.
     _reset() {
@@ -590,5 +650,5 @@
     }
   }
 
-  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, neighborSteps, MAX_TYPES };
+  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, neighborSteps, CONTINENTS, MAX_TYPES };
 })(typeof window !== 'undefined' ? window : globalThis);

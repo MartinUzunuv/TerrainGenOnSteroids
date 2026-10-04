@@ -92,7 +92,7 @@
 
     function addType() {
       if (types().length >= MAX_TYPES) return;
-      const t = { id: '', name: 'New type', color: randomColor(), weight: 0.1, neighbors: [], weightNear: {} };
+      const t = { id: '', name: 'New type', color: randomColor(), weight: 0.1, continent: '', neighbors: [], weightNear: {} };
       t.id = uniqueId(slug(t.name));
       t.neighbors.push(t.id);
       types().push(t);
@@ -207,6 +207,21 @@
         },
       });
 
+      const continentSel = h('select', {
+        onchange: () => {
+          t.continent = continentSel.value;
+          onChange('rules');
+        },
+      });
+      for (const [value, label] of [
+        ['', 'None (same everywhere)'],
+        ['water', 'Water'],
+        ['land', 'Land'],
+        ['mountain', 'Mountain'],
+      ]) {
+        continentSel.append(h('option', { value, selected: (t.continent || '') === value }, label));
+      }
+
       function renderChips() {
         chips.textContent = '';
         for (const o of types()) {
@@ -297,6 +312,7 @@
           h('label', {}, 'Colour', colorIn),
           h('label', {}, 'Weight', weightIn)
         ),
+        h('label', { class: 'f-continent' }, 'Continental layer: favoured near', continentSel),
         h('div', { class: 'sub' }, 'Can be next to'),
         chips,
         warn,

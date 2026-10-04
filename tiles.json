@@ -2,71 +2,83 @@
   "types": [
     {
       "id": "deep_water", "name": "Deep water", "color": "#1d3f8f",
+      "continent": "water",
       "weight": 0.5,
       "neighbors": ["deep_water", "water"],
       "weightNear": { "deep_water": 3 }
     },
     {
       "id": "water", "name": "Water", "color": "#3a7bd5",
+      "continent": "water",
       "weight": 0.5,
       "neighbors": ["deep_water", "water", "sand"],
       "weightNear": { "water": 2.5 }
     },
     {
       "id": "reef", "name": "Coral reef", "color": "#e8837a",
+      "continent": "water",
       "weight": 0.06,
       "neighbors": ["water", "reef"],
       "weightNear": { "reef": 1.5 }
     },
     {
       "id": "sand", "name": "Beach / sand", "color": "#e8d49a",
+      "continent": "land",
       "weight": 0.3,
       "neighbors": ["water", "sand", "grass"]
     },
     {
       "id": "dunes", "name": "Dunes", "color": "#d39d5b",
+      "continent": "land",
       "weight": 0.1,
       "neighbors": ["sand", "dunes"],
       "weightNear": { "dunes": 2 }
     },
     {
       "id": "grass", "name": "Grassland", "color": "#7cb342",
+      "continent": "land",
       "weight": 0.7,
       "neighbors": ["sand", "grass", "forest"],
       "weightNear": { "grass": 2.5 }
     },
     {
       "id": "swamp", "name": "Swamp", "color": "#5d6b3c",
+      "continent": "land",
       "weight": 0.1,
       "neighbors": ["grass", "swamp"],
       "weightNear": { "swamp": 2 }
     },
     {
       "id": "farmland", "name": "Farmland", "color": "#c9b037",
+      "continent": "land",
       "weight": 0.03,
       "neighbors": ["grass", "farmland", "village"],
       "weightNear": { "farmland": 1.5, "village": 1 }
     },
     {
       "id": "village", "name": "Village", "color": "#8b5a2b",
+      "continent": "land",
       "weight": 0.05,
       "neighbors": ["sand", "grass", "village", "forest", "farmland"],
       "weightNear": { "village": 0.7 }
     },
     {
       "id": "forest", "name": "Forest", "color": "#2e7d32",
+      "continent": "land",
       "weight": 0.5,
       "neighbors": ["grass", "forest", "mountain"],
       "weightNear": { "forest": 2.5 }
     },
     {
       "id": "mountain", "name": "Mountain", "color": "#8a8580",
+      "continent": "mountain",
       "weight": 0.2,
       "neighbors": ["forest", "mountain", "snow"],
       "weightNear": { "mountain": 2 }
     },
     {
       "id": "snow", "name": "Snowy peak", "color": "#eef2f5",
+      "continent": "mountain",
       "weight": 0.3,
       "neighbors": ["mountain", "snow"],
       "weightNear": { "snow": 3 }

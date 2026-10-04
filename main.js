@@ -24,6 +24,12 @@
     stability: $('stability'),
     stabilityStrength: $('stabilityStrength'),
     stabilityOut: $('stabilityOut'),
+    continents: $('continents'),
+    contPoints: $('contPoints'),
+    contPointsOut: $('contPointsOut'),
+    contStrength: $('contStrength'),
+    contStrengthOut: $('contStrengthOut'),
+    contShow: $('contShow'),
     seed: $('seed'),
     speed: $('speed'),
     speedOut: $('speedOut'),
@@ -138,6 +144,7 @@
         name: t.name,
         color: toHex(parseColor(t.color, t.id)),
         weight: t.weight,
+        continent: t.continent,
         neighbors: compiled.types.filter((_, j) => (compiled.allowed[i] >>> j) & 1).map((o) => o.id),
         weightNear: Object.fromEntries(
           compiled.types.map((o, j) => [o.id, compiled.near[i * T + j]]).filter(([, v]) => !Number.isNaN(v))
@@ -148,11 +155,12 @@
 
   function exportable() {
     return {
-      types: config.types.map(({ id, name, color, weight, neighbors, weightNear }) => ({
+      types: config.types.map(({ id, name, color, weight, continent, neighbors, weightNear }) => ({
         id,
         name,
         color,
         weight,
+        ...(continent ? { continent } : {}),
         neighbors,
         ...(Object.keys(weightNear).length ? { weightNear } : {}),
       })),
@@ -273,6 +281,9 @@
       height,
       radius2: RADIUS_STEPS[Number(ui.radius.value)].radius2,
       stability: ui.stability.checked ? stabilityStrength() : 0,
+      continents: ui.continents.checked
+        ? { count: Number(ui.contPoints.value), strength: Number(ui.contStrength.value) }
+        : null,
       selection: ui.selection.value,
       seed: seedUsed,
     });
@@ -456,8 +467,36 @@
     offCtx.putImageData(image, 0, 0);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(off, 0, 0, ui.canvas.width, ui.canvas.height);
+    if (ui.contShow.checked) drawContinentPoints();
     updatePanel();
     updateHover();
+  }
+
+  const POINT_COLORS = { water: '#3a7bd5', land: '#7cb342', mountain: '#8a8580' };
+
+  function drawContinentPoints() {
+    const sx = ui.canvas.width / solver.W;
+    const sy = ui.canvas.height / solver.H;
+    const r = Math.max(7, Math.min(11, sx * 1.6));
+    ctx.font = `bold ${Math.round(r * 1.1)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const p of solver.contPoints) {
+      const x = p.x * sx;
+      const y = p.y * sy;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = POINT_COLORS[p.kind];
+      ctx.fill();
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#fff';
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.fillText(p.kind[0].toUpperCase(), x, y + 1);
+    }
   }
 
   const fmt = (n) => n.toLocaleString('en-US');
@@ -613,6 +652,30 @@
     ui.stabilityOut.title = `A type gets up to ${shown}× its weight when every settled neighbour already has it`;
   }
   ui.stabilityStrength.addEventListener('input', updateStabilityLabel);
+
+  function updateContinentLabels() {
+    const on = ui.continents.checked;
+    ui.contPoints.disabled = !on;
+    ui.contStrength.disabled = !on;
+    ui.contShow.disabled = !on;
+    ui.contPointsOut.textContent = `${ui.contPoints.value} points`;
+    const s = Number(ui.contStrength.value);
+    ui.contStrengthOut.textContent = `${s} · up to ×${Math.round(Math.exp(s)).toLocaleString('en-US')}`;
+  }
+  for (const el of [ui.contPoints, ui.contStrength]) {
+    el.addEventListener('input', updateContinentLabels);
+    el.addEventListener('change', generate);
+  }
+  ui.continents.addEventListener('change', () => {
+    updateContinentLabels();
+    generate();
+  });
+  ui.contShow.addEventListener('change', () => {
+    if (solver) {
+      solver.markAllDirty();
+      draw();
+    }
+  });
   ui.stability.addEventListener('change', () => {
     updateStabilityLabel();
     generate();
@@ -692,11 +755,33 @@
   updateJitterLabel();
   updateRadiusLabel();
   updateStabilityLabel();
-  let saved = null;
-  try {
-    saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-  } catch (_) {
-    // no saved edits
+  updateContinentLabels();
+
+  // Types saved before the continental layer existed have no kind yet: borrow the defaults from
+  // tiles.json for the ids that match, so the layer works without resetting the user's edits.
+  async function addDefaultContinents(saved) {
+    try {
+      const res = await fetch('tiles.json', { cache: 'no-store' });
+      const defaults = (await res.json()).types;
+      for (const t of saved.types) {
+        const d = defaults.find((o) => o.id === t.id);
+        if (d && d.continent) t.continent = d.continent;
+      }
+    } catch (_) {
+      // defaults unavailable: types simply stay without a kind
+    }
   }
-  if (!saved || !useConfig(saved)) loadDefaults();
+
+  (async () => {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    } catch (_) {
+      // no saved edits
+    }
+    if (saved && Array.isArray(saved.types) && !saved.types.some((t) => t && 'continent' in t)) {
+      await addDefaultContinents(saved);
+    }
+    if (!saved || !useConfig(saved)) loadDefaults();
+  })();
 })();
