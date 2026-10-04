@@ -213,12 +213,8 @@
           onChange('rules');
         },
       });
-      for (const [value, label] of [
-        ['', 'None (same everywhere)'],
-        ['water', 'Water'],
-        ['land', 'Land'],
-        ['mountain', 'Mountain'],
-      ]) {
+      const kinds = [['', 'None (same everywhere)'], ...(getConfig().continents || []).map((k) => [k.id, k.name])];
+      for (const [value, label] of kinds) {
         continentSel.append(h('option', { value, selected: (t.continent || '') === value }, label));
       }
 
@@ -335,5 +331,124 @@
     return { render, addType, setShares, canAdd: () => types().length < MAX_TYPES };
   }
 
-  global.TerrainEditor = { createTypeEditor };
+  // Continental kinds editor: one row per kind (marker colour, name, spawn odds, resulting chance).
+  // onChange('rules') for odds / added / deleted kinds, onChange('kind-label') for name or colour.
+  function createKindEditor(root, { getConfig, onChange }) {
+    const kinds = () => getConfig().continents;
+    const pctEls = new Map(); // kind -> its chance label
+
+    function uniqueId(base, except) {
+      let id = base;
+      for (let n = 2; kinds().some((k) => k.id === id && k !== except); n++) id = `${base}_${n}`;
+      return id;
+    }
+
+    // Ids follow the name; types pointing at the old id are moved along.
+    function syncId(kind) {
+      const old = kind.id;
+      const id = uniqueId(slug(kind.name), kind);
+      if (id === old) return;
+      for (const t of getConfig().types) if (t.continent === old) t.continent = id;
+      kind.id = id;
+    }
+
+    function updateChances() {
+      const total = kinds().reduce((a, k) => a + k.odds, 0);
+      for (const [k, el] of pctEls) {
+        el.textContent = total > 0 ? `${((k.odds / total) * 100).toFixed(0)}%` : '–';
+      }
+    }
+
+    function render() {
+      root.textContent = '';
+      pctEls.clear();
+      root.append(
+        h('li', { class: 'kind kind-head' }, h('span', {}, ''), h('span', {}, 'Name'), h('span', {}, 'Odds'), h('span', {}, 'Chance'), h('span', {}, ''))
+      );
+      for (const k of kinds()) root.append(renderRow(k));
+      updateChances();
+    }
+
+    function renderRow(k) {
+      const color = h('input', {
+        type: 'color',
+        value: k.color,
+        title: 'Marker colour',
+        oninput: () => {
+          k.color = color.value;
+          onChange('kind-label');
+        },
+      });
+      const name = h('input', {
+        type: 'text',
+        value: k.name,
+        spellcheck: false,
+        'aria-label': 'Kind name',
+        oninput: () => {
+          k.name = name.value;
+          onChange('kind-label');
+        },
+        onchange: () => {
+          if (!k.name.trim()) {
+            k.name = 'Unnamed';
+            name.value = k.name;
+          }
+          syncId(k);
+          onChange('kind-label');
+        },
+      });
+      const odds = h('input', {
+        type: 'number',
+        min: 0,
+        step: 0.01,
+        value: k.odds,
+        'aria-label': `Spawn odds for ${k.name}`,
+        title: 'Relative odds of a continental point being this kind',
+        oninput: () => {
+          const v = parseFloat(odds.value);
+          k.odds = v >= 0 ? v : 0;
+          updateChances();
+          onChange('rules');
+        },
+      });
+      const pct = h('span', { class: 'pct', title: 'Chance that a point is this kind' });
+      pctEls.set(k, pct);
+      const del = h('button', {
+        type: 'button',
+        class: 'icon',
+        title: 'Delete kind',
+        disabled: kinds().length <= 1,
+        onclick: () => deleteKind(k),
+      }, '×');
+      return h('li', { class: 'kind' }, color, name, odds, pct, del);
+    }
+
+    function addKind() {
+      const k = { id: uniqueId('new_kind'), name: 'New kind', color: randomColor(), odds: 0.1 };
+      kinds().push(k);
+      render();
+      onChange('rules');
+      const inputs = root.querySelectorAll('input[type="text"]');
+      const input = inputs[inputs.length - 1];
+      if (input) {
+        input.focus();
+        input.select();
+      }
+    }
+
+    function deleteKind(k) {
+      if (kinds().length <= 1) return;
+      const used = getConfig().types.filter((t) => t.continent === k.id);
+      const note = used.length ? `\n${used.length} type(s) assigned to it will be set to None.` : '';
+      if (!confirm(`Delete the "${k.name}" kind?${note}`)) return;
+      getConfig().continents = kinds().filter((o) => o !== k);
+      for (const t of used) t.continent = '';
+      render();
+      onChange('rules');
+    }
+
+    return { render, addKind };
+  }
+
+  global.TerrainEditor = { createTypeEditor, createKindEditor };
 })(window);

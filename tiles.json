@@ -1,4 +1,14 @@
 {
+  "version": 2,
+  "continents": [
+    { "id": "water",    "name": "Water",    "color": "#3a7bd5", "odds": 0.3 },
+    { "id": "land",     "name": "Land",     "color": "#7cb342", "odds": 0.25 },
+    { "id": "mountain", "name": "Mountain", "color": "#8a8580", "odds": 0.12 },
+    { "id": "desert",   "name": "Desert",   "color": "#d9b26f", "odds": 0.11 },
+    { "id": "tundra",   "name": "Tundra",   "color": "#a9b8a0", "odds": 0.09 },
+    { "id": "jungle",   "name": "Jungle",   "color": "#1a9850", "odds": 0.09 },
+    { "id": "volcanic", "name": "Volcanic", "color": "#e8501f", "odds": 0.04 }
+  ],
   "types": [
     {
       "id": "deep_water", "name": "Deep water", "color": "#1d3f8f",
@@ -28,13 +38,6 @@
       "neighbors": ["water", "sand", "grass"]
     },
     {
-      "id": "dunes", "name": "Dunes", "color": "#d39d5b",
-      "continent": "land",
-      "weight": 0.1,
-      "neighbors": ["sand", "dunes"],
-      "weightNear": { "dunes": 2 }
-    },
-    {
       "id": "grass", "name": "Grassland", "color": "#7cb342",
       "continent": "land",
       "weight": 0.7,
@@ -42,11 +45,18 @@
       "weightNear": { "grass": 2.5 }
     },
     {
-      "id": "swamp", "name": "Swamp", "color": "#5d6b3c",
+      "id": "meadow", "name": "Meadow", "color": "#b5d96b",
       "continent": "land",
       "weight": 0.1,
-      "neighbors": ["grass", "swamp"],
-      "weightNear": { "swamp": 2 }
+      "neighbors": ["grass", "meadow"],
+      "weightNear": { "meadow": 1.5 }
+    },
+    {
+      "id": "hills", "name": "Hills", "color": "#9aa84c",
+      "continent": "land",
+      "weight": 0.2,
+      "neighbors": ["grass", "hills", "forest"],
+      "weightNear": { "hills": 1.5 }
     },
     {
       "id": "farmland", "name": "Farmland", "color": "#c9b037",
@@ -82,6 +92,83 @@
       "weight": 0.3,
       "neighbors": ["mountain", "snow"],
       "weightNear": { "snow": 3 }
+    },
+    {
+      "id": "desert", "name": "Desert", "color": "#d9b26f",
+      "continent": "desert",
+      "weight": 0.4,
+      "neighbors": ["sand", "grass", "desert", "dunes"],
+      "weightNear": { "desert": 2 }
+    },
+    {
+      "id": "dunes", "name": "Dunes", "color": "#c98d4f",
+      "continent": "desert",
+      "weight": 0.1,
+      "neighbors": ["sand", "dunes", "desert"],
+      "weightNear": { "dunes": 2 }
+    },
+    {
+      "id": "mesa", "name": "Mesa", "color": "#a8553a",
+      "continent": "desert",
+      "weight": 0.1,
+      "neighbors": ["desert", "mesa"],
+      "weightNear": { "mesa": 1.5 }
+    },
+    {
+      "id": "oasis", "name": "Oasis", "color": "#3fae8f",
+      "continent": "desert",
+      "weight": 0.03,
+      "neighbors": ["desert", "oasis"],
+      "weightNear": { "oasis": 0.5 }
+    },
+    {
+      "id": "tundra", "name": "Tundra", "color": "#a9b8a0",
+      "continent": "tundra",
+      "weight": 0.4,
+      "neighbors": ["grass", "tundra", "taiga", "glacier"],
+      "weightNear": { "tundra": 2 }
+    },
+    {
+      "id": "taiga", "name": "Taiga", "color": "#3d6b4f",
+      "continent": "tundra",
+      "weight": 0.3,
+      "neighbors": ["tundra", "taiga"],
+      "weightNear": { "taiga": 2 }
+    },
+    {
+      "id": "glacier", "name": "Glacier", "color": "#cde8f5",
+      "continent": "tundra",
+      "weight": 0.2,
+      "neighbors": ["tundra", "glacier"],
+      "weightNear": { "glacier": 2.5 }
+    },
+    {
+      "id": "swamp", "name": "Swamp", "color": "#5d6b3c",
+      "continent": "jungle",
+      "weight": 0.1,
+      "neighbors": ["grass", "swamp", "jungle"],
+      "weightNear": { "swamp": 2 }
+    },
+    {
+      "id": "jungle", "name": "Jungle", "color": "#1a9850",
+      "continent": "jungle",
+      "weight": 0.4,
+      "neighbors": ["grass", "forest", "jungle", "swamp"],
+      "weightNear": { "jungle": 2.5 }
+    },
+    {
+      "id": "ash", "name": "Volcanic rock", "color": "#4a4040",
+      "continent": "volcanic",
+      "weight": 0.3,
+      "neighbors": ["mountain", "ash", "lava"],
+      "weightNear": { "ash": 2 }
+    },
+    {
+      "id": "lava", "name": "Lava", "color": "#e8501f",
+      "continent": "volcanic",
+      "weight": 0.15,
+      "neighbors": ["ash", "lava"],
+      "weightNear": { "lava": 2 }
     }
   ]
 }

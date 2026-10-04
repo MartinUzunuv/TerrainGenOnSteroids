@@ -11,8 +11,27 @@
   'use strict';
 
   const MAX_TYPES = 32; // one bit per type in a Uint32
-  const CONTINENTS = ['water', 'land', 'mountain'];
-  const CONTINENT_ODDS = [0.4, 0.4, 0.2]; // how often a continental point is water / land / mountain
+  // Used when a config has no "continents" list (saved before kinds became configurable).
+  const DEFAULT_CONTINENTS = [
+    { id: 'water', name: 'Water', color: '#3a7bd5', odds: 0.4 },
+    { id: 'land', name: 'Land', color: '#7cb342', odds: 0.4 },
+    { id: 'mountain', name: 'Mountain', color: '#8a8580', odds: 0.2 },
+  ];
+
+  function compileContinents(list) {
+    if (list === undefined) list = DEFAULT_CONTINENTS;
+    if (!Array.isArray(list)) throw new Error('"continents" must be a list.');
+    const seen = new Set();
+    return list.map((k, i) => {
+      if (!k || typeof k !== 'object' || k.id === undefined) throw new Error(`continents[${i}] needs an "id".`);
+      const id = String(k.id);
+      if (seen.has(id)) throw new Error(`Duplicate continent id "${id}".`);
+      seen.add(id);
+      const odds = k.odds === undefined ? 1 : Number(k.odds);
+      if (!(odds >= 0)) throw new Error(`Continent "${id}".odds must be a number >= 0.`);
+      return { id, name: k.name !== undefined ? String(k.name) : id, color: k.color !== undefined ? String(k.color) : '#888888', odds };
+    });
+  }
 
   // Every [dx, dy] with 0 < dx² + dy² <= radius2.
   function neighborOffsets(radius2) {
@@ -98,7 +117,8 @@
 
     const allowed = new Uint32Array(T); // allowed[t] = mask of types that may sit next to t
     const weight = new Float64Array(T);
-    const continent = new Int8Array(T).fill(-1); // index into CONTINENTS, -1 = none
+    const kinds = compileContinents(config.continents);
+    const continent = new Int16Array(T).fill(-1); // index into kinds, -1 = none
     const near = new Float64Array(T * T).fill(NaN); // near[t*T + n] = weight of t when next to n
 
     const types = defs.map((d, i) => {
@@ -128,9 +148,9 @@
       }
 
       if (d.continent !== undefined && d.continent !== null && d.continent !== '' && d.continent !== 'none') {
-        continent[i] = CONTINENTS.indexOf(String(d.continent).toLowerCase());
+        continent[i] = kinds.findIndex((k) => k.id === String(d.continent));
         if (continent[i] < 0) {
-          throw new Error(`"${id}".continent must be one of ${CONTINENTS.join(', ')} (or left out).`);
+          throw new Error(`"${id}".continent must be one of ${kinds.map((k) => k.id).join(', ')} (or left out).`);
         }
       }
 
@@ -139,11 +159,11 @@
         name: d.name !== undefined ? String(d.name) : id,
         color: d.color !== undefined ? String(d.color) : '#ff00ff',
         weight: w,
-        continent: continent[i] >= 0 ? CONTINENTS[continent[i]] : '',
+        continent: continent[i] >= 0 ? kinds[continent[i]].id : '',
       };
     });
 
-    return { types, allowed, weight, near, continent };
+    return { types, allowed, weight, near, continent, kinds };
   }
 
   class Solver {
@@ -284,7 +304,7 @@
         // Continental layer: favour the types that belong to the kind of land this cell is in.
         if (contShare) {
           const k = this.rules.continent[t];
-          w *= k >= 0 ? Math.exp(contStrength * contShare[c * 3 + k]) : contNeutral;
+          w *= k >= 0 ? Math.exp(contStrength * contShare[c * this.K + k]) : contNeutral;
         }
         // Stability: the more settled neighbours already have this type, the likelier it gets.
         // The weight is multiplied by e^(stability × share of settled neighbours with this type),
@@ -373,46 +393,55 @@
 
     // ---- internals --------------------------------------------------------
 
-    // Continental layer: a few random points, each water, land or mountain. Every cell gets a share
-    // of each kind, weighting the points by inverse square distance, so a cell right next to a water
-    // point is ~100% water and one halfway between a water and a land point is 50/50. optionsFor
-    // multiplies a type's weight by e^(strength × share of its kind); types without a kind get the
-    // average boost e^(strength / 3), so they stay equally likely everywhere.
+    // Continental layer: a few random points, each of one kind (water, land, desert, …). Every cell
+    // gets a share of each kind, weighting the points by inverse square distance, so a cell right
+    // next to a water point is ~100% water and one halfway between a water and a land point is
+    // 50/50. optionsFor multiplies a type's weight by e^(strength × share of its kind); types
+    // without a kind get the average boost e^(strength / kinds), so they stay equally likely
+    // everywhere.
     _buildContinents(cont, seed) {
       this.contShare = null;
       this.contPoints = [];
+      const kinds = this.rules.kinds;
+      const K = (this.K = kinds.length);
       const count = cont ? Math.floor(cont.count) : 0;
       const strength = cont ? Number(cont.strength) : 0;
-      if (!(count > 0 && strength > 0)) return;
+      if (!(count > 0 && strength > 0 && K > 0)) return;
 
       const { W, H, N } = this;
       const rng = makeRng((seed ^ 0x5bd1e995) >>> 0);
+      // The two most likely kinds always get a point, so a map can't end up with no sea or no land.
+      const byOdds = kinds.map((k, i) => i).sort((a, b) => kinds[b].odds - kinds[a].odds);
+      const totalOdds = kinds.reduce((a, k) => a + k.odds, 0);
       for (let i = 0; i < count; i++) {
-        let kind = i; // the first three cover every kind once, the rest are random
-        if (i >= CONTINENTS.length) {
-          const r = rng();
-          kind = r < CONTINENT_ODDS[0] ? 0 : r < CONTINENT_ODDS[0] + CONTINENT_ODDS[1] ? 1 : 2;
+        let k = byOdds[i];
+        if (i >= Math.min(2, K)) {
+          let r = rng() * totalOdds;
+          k = totalOdds > 0 ? kinds.findIndex((o) => (r -= o.odds) < 0) : (rng() * K) | 0;
+          if (k < 0) k = K - 1;
         }
-        this.contPoints.push({ x: rng() * W, y: rng() * H, kind: CONTINENTS[kind], k: kind });
+        this.contPoints.push({ x: rng() * W, y: rng() * H, k, kind: kinds[k] });
       }
 
-      const share = new Float32Array(N * 3);
-      const sums = new Float64Array(3);
+      const share = new Float32Array(N * K);
+      const sums = new Float64Array(K);
       for (let c = 0; c < N; c++) {
         const x = (c % W) + 0.5;
         const y = ((c / W) | 0) + 0.5;
         sums.fill(0);
+        let total = 0;
         for (const p of this.contPoints) {
           const dx = p.x - x;
           const dy = p.y - y;
-          sums[p.k] += 1 / (dx * dx + dy * dy + 1);
+          const w = 1 / (dx * dx + dy * dy + 1);
+          sums[p.k] += w;
+          total += w;
         }
-        const total = sums[0] + sums[1] + sums[2];
-        for (let k = 0; k < 3; k++) share[c * 3 + k] = sums[k] / total;
+        for (let k = 0; k < K; k++) share[c * K + k] = sums[k] / total;
       }
       this.contShare = share;
       this.contStrength = strength;
-      this.contNeutral = Math.exp(strength / 3);
+      this.contNeutral = Math.exp(strength / K);
     }
 
     // Everything back into full superposition.
@@ -650,5 +679,5 @@
     }
   }
 
-  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, neighborSteps, CONTINENTS, MAX_TYPES };
+  global.TerrainWFC = { compileRules, Solver, seedFromString, makeRng, neighborSteps, MAX_TYPES };
 })(typeof window !== 'undefined' ? window : globalThis);

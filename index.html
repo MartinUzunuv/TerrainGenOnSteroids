@@ -68,10 +68,10 @@
 
       <section class="group">
         <h2>Continental layer</h2>
-        <label class="check first"><input id="continents" type="checkbox" checked> Continental layer (random water / land / mountain points)</label>
+        <label class="check first"><input id="continents" type="checkbox" checked> Continental layer (random water, land, desert… points)</label>
         <label class="field slider-label" for="contPoints">Points</label>
         <div class="speed">
-          <input id="contPoints" type="range" min="1" max="40" step="1" value="8">
+          <input id="contPoints" type="range" min="1" max="40" step="1" value="12">
           <output id="contPointsOut"></output>
         </div>
         <label class="field slider-label" for="contStrength">Strength (how hard cells lean toward the nearest points' kind)</label>
@@ -80,6 +80,12 @@
           <output id="contStrengthOut"></output>
         </div>
         <label class="check"><input id="contShow" type="checkbox"> Show the points on the map</label>
+        <div class="group-head sub-head">
+          <h3>Kinds and spawn odds</h3>
+          <button id="addKind" class="small" type="button">+ Add kind</button>
+        </div>
+        <ul class="kinds" id="kinds"></ul>
+        <p class="hint">Each point picks a kind by these odds; the two most likely kinds always get at least one point. Assign terrain types to a kind in the type editor below.</p>
       </section>
 
       <section class="group">

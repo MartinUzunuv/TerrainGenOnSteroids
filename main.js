@@ -39,6 +39,8 @@
     jitterOut: $('jitterOut'),
     types: $('types'),
     addType: $('addType'),
+    kinds: $('kinds'),
+    addKind: $('addKind'),
     exportJson: $('exportJson'),
     importJson: $('importJson'),
     resetTypes: $('resetTypes'),
@@ -139,6 +141,13 @@
     const compiled = compileRules(raw);
     const T = compiled.types.length;
     return {
+      version: Number(raw.version) || 1,
+      continents: compiled.kinds.map((k) => ({
+        id: k.id,
+        name: k.name,
+        color: toHex(parseColor(k.color, k.id)),
+        odds: k.odds,
+      })),
       types: compiled.types.map((t, i) => ({
         id: t.id,
         name: t.name,
@@ -155,6 +164,8 @@
 
   function exportable() {
     return {
+      version: config.version,
+      continents: config.continents,
       types: config.types.map(({ id, name, color, weight, continent, neighbors, weightNear }) => ({
         id,
         name,
@@ -184,9 +195,19 @@
     }
     showError('');
     editor.render();
+    kindEditor.render();
     updateAddButton();
     compileAndGenerate();
     return true;
+  }
+
+  // Rule changes: regenerate once the user pauses for a moment.
+  function scheduleRegen() {
+    clearTimeout(regenTimer);
+    regenTimer = setTimeout(() => {
+      regenTimer = 0;
+      compileAndGenerate();
+    }, 250);
   }
 
   function compileAndGenerate() {
@@ -243,12 +264,24 @@
         }
         return;
       }
-      // Rule changes: regenerate once the user pauses for a moment.
-      clearTimeout(regenTimer);
-      regenTimer = setTimeout(() => {
-        regenTimer = 0;
-        compileAndGenerate();
-      }, 250);
+      scheduleRegen();
+    },
+  });
+
+  const kindEditor = window.TerrainEditor.createKindEditor(ui.kinds, {
+    getConfig: () => config,
+    onChange(kind) {
+      save();
+      editor.render(); // the types' kind dropdowns list these kinds
+      if (kind === 'kind-label') {
+        // Names and colours only change the markers: update them in place, no new map.
+        if (rules && rules.kinds.length === config.continents.length) {
+          config.continents.forEach((k, i) => Object.assign(rules.kinds[i], { name: k.name, color: k.color }));
+        }
+        if (solver) draw();
+        return;
+      }
+      scheduleRegen();
     },
   });
 
@@ -472,8 +505,6 @@
     updateHover();
   }
 
-  const POINT_COLORS = { water: '#3a7bd5', land: '#7cb342', mountain: '#8a8580' };
-
   function drawContinentPoints() {
     const sx = ui.canvas.width / solver.W;
     const sy = ui.canvas.height / solver.H;
@@ -486,7 +517,7 @@
       const y = p.y * sy;
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = POINT_COLORS[p.kind];
+      ctx.fillStyle = p.kind.color;
       ctx.fill();
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
@@ -495,7 +526,7 @@
       ctx.strokeStyle = '#fff';
       ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.fillText(p.kind[0].toUpperCase(), x, y + 1);
+      ctx.fillText(p.kind.name.charAt(0).toUpperCase(), x, y + 1);
     }
   }
 
@@ -690,6 +721,7 @@
   ui.radius.addEventListener('input', updateRadiusLabel);
 
   ui.addType.addEventListener('click', () => editor.addType());
+  ui.addKind.addEventListener('click', () => kindEditor.addKind());
 
   ui.exportJson.addEventListener('click', () => {
     if (!config) return;
@@ -757,19 +789,31 @@
   updateStabilityLabel();
   updateContinentLabels();
 
-  // Types saved before the continental layer existed have no kind yet: borrow the defaults from
-  // tiles.json for the ids that match, so the layer works without resetting the user's edits.
-  async function addDefaultContinents(saved) {
+  // Saved edits made against older defaults: bring in what tiles.json has added since (continental
+  // kinds, types, a type's kind if it had none) without touching anything the user already has.
+  // Returns true if anything changed.
+  async function mergeNewDefaults(saved) {
+    let defaults;
     try {
       const res = await fetch('tiles.json', { cache: 'no-store' });
-      const defaults = (await res.json()).types;
-      for (const t of saved.types) {
-        const d = defaults.find((o) => o.id === t.id);
-        if (d && d.continent) t.continent = d.continent;
-      }
+      defaults = await res.json();
     } catch (_) {
-      // defaults unavailable: types simply stay without a kind
+      return false; // defaults unavailable: keep the saved edits as they are
     }
+    if ((Number(saved.version) || 1) >= (Number(defaults.version) || 1)) return false;
+
+    const kinds = Array.isArray(saved.continents) ? saved.continents : [];
+    for (const k of defaults.continents || []) {
+      if (!kinds.some((o) => o.id === k.id)) kinds.push(k);
+    }
+    saved.continents = kinds;
+    for (const d of defaults.types) {
+      const t = saved.types.find((o) => o.id === d.id);
+      if (!t) saved.types.push(d);
+      else if (!t.continent && d.continent) t.continent = d.continent;
+    }
+    saved.version = defaults.version;
+    return true;
   }
 
   (async () => {
@@ -779,9 +823,8 @@
     } catch (_) {
       // no saved edits
     }
-    if (saved && Array.isArray(saved.types) && !saved.types.some((t) => t && 'continent' in t)) {
-      await addDefaultContinents(saved);
-    }
+    const merged = saved && Array.isArray(saved.types) && (await mergeNewDefaults(saved));
     if (!saved || !useConfig(saved)) loadDefaults();
+    else if (merged) save();
   })();
 })();
