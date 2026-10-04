@@ -23,6 +23,13 @@
     return e;
   }
 
+  function renameKey(obj, from, to) {
+    if (obj && from in obj) {
+      obj[to] = obj[from];
+      delete obj[from];
+    }
+  }
+
   function swatch(color) {
     const s = h('span', { class: 'swatch' });
     s.style.background = color;
@@ -77,11 +84,9 @@
       if (id === old) return;
       for (const t of types()) {
         t.neighbors = t.neighbors.map((n) => (n === old ? id : n));
-        if (old in t.weightNear) {
-          t.weightNear[id] = t.weightNear[old];
-          delete t.weightNear[old];
-        }
+        renameKey(t.weightNear, old, id);
       }
+      for (const z of getConfig().climates || []) renameKey(z.types, old, id);
       shares.set(id, shares.get(old));
       const pctEl = shareEls.get(old);
       shareEls.delete(old);
@@ -118,6 +123,7 @@
         o.neighbors = o.neighbors.filter((id) => id !== t.id);
         delete o.weightNear[t.id];
       }
+      for (const z of cfg.climates || []) delete z.types[t.id];
       openId = null;
       render();
       onChange('structure');
@@ -349,6 +355,7 @@
       const id = uniqueId(slug(kind.name), kind);
       if (id === old) return;
       for (const t of getConfig().types) if (t.continent === old) t.continent = id;
+      for (const z of getConfig().climates || []) renameKey(z.kinds, old, id);
       kind.id = id;
     }
 
@@ -443,6 +450,7 @@
       if (!confirm(`Delete the "${k.name}" kind?${note}`)) return;
       getConfig().continents = kinds().filter((o) => o !== k);
       for (const t of used) t.continent = '';
+      for (const z of getConfig().climates || []) delete z.kinds[k.id];
       render();
       onChange('rules');
     }
@@ -450,5 +458,144 @@
     return { render, addKind };
   }
 
-  global.TerrainEditor = { createTypeEditor, createKindEditor };
+  // Rows of "<select> ×<number> [×]" editing an { id: multiplier } object, plus "+ Add".
+  // `options` is [[id, label]]; each id can appear once.
+  function multiplierList(container, obj, options, onChange) {
+    function render() {
+      container.textContent = '';
+      for (const id of Object.keys(obj)) {
+        const sel = h('select', {
+          onchange: () => {
+            const v = obj[id];
+            delete obj[id];
+            obj[sel.value] = v;
+            render();
+            onChange();
+          },
+        });
+        for (const [value, label] of options) {
+          if (value === id || !(value in obj)) sel.append(h('option', { value, selected: value === id }, label));
+        }
+        const num = h('input', {
+          type: 'number',
+          min: 0,
+          step: 0.1,
+          value: obj[id],
+          'aria-label': 'Multiplier',
+          oninput: () => {
+            const v = parseFloat(num.value);
+            obj[id] = v >= 0 ? v : 0;
+            onChange();
+          },
+        });
+        const remove = h('button', {
+          type: 'button',
+          class: 'icon',
+          title: 'Remove',
+          onclick: () => {
+            delete obj[id];
+            render();
+            onChange();
+          },
+        }, '×');
+        container.append(h('div', { class: 'boost mult' }, sel, h('span', {}, '×'), num, remove));
+      }
+      const free = options.find(([value]) => !(value in obj));
+      if (free) {
+        container.append(h('button', {
+          type: 'button',
+          class: 'link',
+          onclick: () => {
+            obj[free[0]] = 2;
+            render();
+            onChange();
+          },
+        }, '+ Add'));
+      }
+    }
+    render();
+  }
+
+  // Climate zone editor: click a zone to edit its name, colour and multipliers.
+  // onChange('rules') for multipliers, onChange('label') for name or colour.
+  function createClimateEditor(root, { getConfig, onChange }) {
+    let openId = null;
+    const zones = () => getConfig().climates || [];
+
+    function render() {
+      root.textContent = '';
+      zones().forEach((z, i) => root.append(renderItem(z, i)));
+    }
+
+    function summary(z) {
+      const nk = Object.keys(z.kinds).length;
+      const nt = Object.keys(z.types).length;
+      return `${nk} kind${nk === 1 ? '' : 's'} · ${nt} type${nt === 1 ? '' : 's'}`;
+    }
+
+    function renderItem(z, i) {
+      const open = z.id === openId;
+      const row = { swatch: swatch(z.color), name: h('span', { class: 'name' }, z.name), info: h('span', { class: 'w' }, summary(z)) };
+      const head = h(
+        'button',
+        {
+          type: 'button',
+          class: 'type-row zone-row',
+          title: open ? 'Close' : 'Edit this zone',
+          onclick: () => {
+            openId = open ? null : z.id;
+            render();
+          },
+        },
+        h('span', { class: 'zone-n' }, String(i + 1)), row.swatch, row.name, row.info, h('span', { class: 'chev' }, '›')
+      );
+      head.setAttribute('aria-expanded', String(open));
+      const li = h('li', { class: open ? 'type open' : 'type' }, head);
+      if (open) li.append(renderPanel(z, row));
+      return li;
+    }
+
+    function renderPanel(z, row) {
+      const nameIn = h('input', {
+        type: 'text',
+        value: z.name,
+        spellcheck: false,
+        oninput: () => {
+          z.name = nameIn.value;
+          row.name.textContent = z.name;
+          onChange('label');
+        },
+      });
+      const colorIn = h('input', {
+        type: 'color',
+        value: z.color,
+        oninput: () => {
+          z.color = colorIn.value;
+          row.swatch.style.background = z.color;
+          onChange('label');
+        },
+      });
+      const changed = () => {
+        row.info.textContent = summary(z);
+        onChange('rules');
+      };
+      const kindList = h('div', { class: 'boosts' });
+      const typeList = h('div', { class: 'boosts' });
+      multiplierList(kindList, z.kinds, (getConfig().continents || []).map((k) => [k.id, k.name]), changed);
+      multiplierList(typeList, z.types, getConfig().types.map((t) => [t.id, t.name]), changed);
+      return h(
+        'div',
+        { class: 'type-edit' },
+        h('div', { class: 'type-fields zone-fields' }, h('label', {}, 'Name', nameIn), h('label', {}, 'Colour', colorIn)),
+        h('div', { class: 'sub' }, 'Continental kinds: spawn odds ×'),
+        kindList,
+        h('div', { class: 'sub' }, 'Terrain types: weight ×'),
+        typeList
+      );
+    }
+
+    return { render };
+  }
+
+  global.TerrainEditor = { createTypeEditor, createKindEditor, createClimateEditor };
 })(window);

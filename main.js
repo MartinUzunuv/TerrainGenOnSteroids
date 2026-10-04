@@ -41,6 +41,11 @@
     addType: $('addType'),
     kinds: $('kinds'),
     addKind: $('addKind'),
+    climate: $('climate'),
+    climLayout: $('climLayout'),
+    climStrength: $('climStrength'),
+    climStrengthOut: $('climStrengthOut'),
+    zones: $('zones'),
     exportJson: $('exportJson'),
     importJson: $('importJson'),
     resetTypes: $('resetTypes'),
@@ -140,8 +145,17 @@
   function normalize(raw) {
     const compiled = compileRules(raw);
     const T = compiled.types.length;
+    const K = compiled.kinds.length;
+    const { zones, kindMult, typeMult } = compiled.climate;
     return {
       version: Number(raw.version) || 1,
+      climates: zones.map((z, i) => ({
+        id: z.id,
+        name: z.name,
+        color: toHex(parseColor(z.color, z.id)),
+        kinds: Object.fromEntries(compiled.kinds.map((k, j) => [k.id, kindMult[i * K + j]]).filter(([, v]) => v !== 1)),
+        types: Object.fromEntries(compiled.types.map((t, j) => [t.id, typeMult[i * T + j]]).filter(([, v]) => v !== 1)),
+      })),
       continents: compiled.kinds.map((k) => ({
         id: k.id,
         name: k.name,
@@ -166,6 +180,7 @@
     return {
       version: config.version,
       continents: config.continents,
+      climates: config.climates,
       types: config.types.map(({ id, name, color, weight, continent, neighbors, weightNear }) => ({
         id,
         name,
@@ -196,6 +211,7 @@
     showError('');
     editor.render();
     kindEditor.render();
+    climateEditor.render();
     updateAddButton();
     compileAndGenerate();
     return true;
@@ -248,6 +264,7 @@
     onChange(kind) {
       save();
       if (kind === 'structure') updateAddButton();
+      if (kind === 'structure' || kind === 'label') climateEditor.render(); // zones list type names
       if (kind === 'label') {
         if (rules && rules.types.length === config.types.length) {
           config.types.forEach((t, i) => (rules.types[i].name = t.name));
@@ -273,12 +290,29 @@
     onChange(kind) {
       save();
       editor.render(); // the types' kind dropdowns list these kinds
+      climateEditor.render(); // and so do the zones' multipliers
       if (kind === 'kind-label') {
         // Names and colours only change the markers: update them in place, no new map.
         if (rules && rules.kinds.length === config.continents.length) {
           config.continents.forEach((k, i) => Object.assign(rules.kinds[i], { name: k.name, color: k.color }));
         }
         if (solver) draw();
+        return;
+      }
+      scheduleRegen();
+    },
+  });
+
+  const climateEditor = window.TerrainEditor.createClimateEditor(ui.zones, {
+    getConfig: () => config,
+    onChange(kind) {
+      save();
+      if (kind === 'label') {
+        // Zone names only show up in the hover text: update in place, no new map.
+        if (rules && rules.climate.zones.length === config.climates.length) {
+          config.climates.forEach((z, i) => Object.assign(rules.climate.zones[i], { name: z.name, color: z.color }));
+        }
+        updateHover();
         return;
       }
       scheduleRegen();
@@ -316,6 +350,9 @@
       stability: ui.stability.checked ? stabilityStrength() : 0,
       continents: ui.continents.checked
         ? { count: Number(ui.contPoints.value), strength: Number(ui.contStrength.value) }
+        : null,
+      climate: ui.climate.checked
+        ? { strength: Number(ui.climStrength.value), layout: ui.climLayout.value }
         : null,
       selection: ui.selection.value,
       seed: seedUsed,
@@ -581,7 +618,8 @@
     }
     const x = hoverCell % solver.W;
     const y = (hoverCell / solver.W) | 0;
-    el.textContent = `(${x}, ${y})  `;
+    const zone = solver.zoneAt(hoverCell);
+    el.textContent = `(${x}, ${y})${zone >= 0 ? ` ${rules.climate.zones[zone].name} zone` : ''}  `;
     const t = solver.typeAt(hoverCell);
     if (t >= 0) {
       const b = document.createElement('strong');
@@ -701,6 +739,19 @@
     updateContinentLabels();
     generate();
   });
+  function updateClimateLabels() {
+    const on = ui.climate.checked;
+    ui.climLayout.disabled = !on;
+    ui.climStrength.disabled = !on;
+    ui.climStrengthOut.textContent = `strength ${Number(ui.climStrength.value).toFixed(1)}`;
+  }
+  ui.climStrength.addEventListener('input', updateClimateLabels);
+  for (const el of [ui.climStrength, ui.climLayout]) el.addEventListener('change', generate);
+  ui.climate.addEventListener('change', () => {
+    updateClimateLabels();
+    generate();
+  });
+
   ui.contShow.addEventListener('change', () => {
     if (solver) {
       solver.markAllDirty();
@@ -788,6 +839,7 @@
   updateRadiusLabel();
   updateStabilityLabel();
   updateContinentLabels();
+  updateClimateLabels();
 
   // Saved edits made against older defaults: bring in what tiles.json has added since (continental
   // kinds, types, a type's kind if it had none) without touching anything the user already has.
@@ -811,6 +863,13 @@
       const t = saved.types.find((o) => o.id === d.id);
       if (!t) saved.types.push(d);
       else if (!t.continent && d.continent) t.continent = d.continent;
+    }
+    if (!Array.isArray(saved.climates) && Array.isArray(defaults.climates)) {
+      // Keep only references to kinds and types the user still has.
+      const keep = (obj, ids) => Object.fromEntries(Object.entries(obj || {}).filter(([id]) => ids.has(id)));
+      const kindIds = new Set(kinds.map((k) => k.id));
+      const typeIds = new Set(saved.types.map((t) => t.id));
+      saved.climates = defaults.climates.map((z) => ({ ...z, kinds: keep(z.kinds, kindIds), types: keep(z.types, typeIds) }));
     }
     saved.version = defaults.version;
     return true;

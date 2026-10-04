@@ -90,6 +90,40 @@
     return h >>> 0;
   }
 
+  // Climate zones, listed from the equator to the poles. Each zone multiplies the spawn odds of
+  // continental kinds (kindMult[zone*K + kind]) and the weights of terrain types
+  // (typeMult[zone*T + type]); anything not listed stays ×1.
+  function compileClimates(list, kinds, T, resolveType) {
+    if (list === undefined) list = [];
+    if (!Array.isArray(list)) throw new Error('"climates" must be a list.');
+    const K = kinds.length;
+    const Z = list.length;
+    const kindMult = new Float64Array(Z * K).fill(1);
+    const typeMult = new Float64Array(Z * T).fill(1);
+    const seen = new Set();
+    const zones = list.map((z, i) => {
+      if (!z || typeof z !== 'object' || z.id === undefined) throw new Error(`climates[${i}] needs an "id".`);
+      const id = String(z.id);
+      if (seen.has(id)) throw new Error(`Duplicate climate id "${id}".`);
+      seen.add(id);
+      const mult = (v, where) => {
+        const n = Number(v);
+        if (!(n >= 0)) throw new Error(`${where} must be a number >= 0.`);
+        return n;
+      };
+      for (const [ref, v] of Object.entries(z.kinds || {})) {
+        const k = kinds.findIndex((o) => o.id === ref);
+        if (k < 0) throw new Error(`Climate "${id}".kinds: unknown continental kind "${ref}".`);
+        kindMult[i * K + k] = mult(v, `Climate "${id}".kinds["${ref}"]`);
+      }
+      for (const [ref, v] of Object.entries(z.types || {})) {
+        typeMult[i * T + resolveType(ref, `Climate "${id}".types`)] = mult(v, `Climate "${id}".types["${ref}"]`);
+      }
+      return { id, name: z.name !== undefined ? String(z.name) : id, color: z.color !== undefined ? String(z.color) : '#888888' };
+    });
+    return { zones, kindMult, typeMult };
+  }
+
   // Turns the JSON config into lookup tables. Throws with a readable message on bad input.
   function compileRules(config) {
     if (!config || !Array.isArray(config.types) || config.types.length === 0) {
@@ -163,7 +197,8 @@
       };
     });
 
-    return { types, allowed, weight, near, continent, kinds };
+    const climate = compileClimates(config.climates, kinds, T, resolve);
+    return { types, allowed, weight, near, continent, kinds, climate };
   }
 
   class Solver {
@@ -171,6 +206,7 @@
     // radius2: neighbours are the cells with dx² + dy² <= radius2 (1 → 4 cells, 2 → 8, 4 → 12, …)
     // stability: how strongly a cell copies its settled neighbours (0 = off), see optionsFor
     // continents: { count, strength } for the continental layer, or null for off
+    // climate: { strength, layout: 'both'|'north' } for climate zones, or null for off
     constructor(rules, opts) {
       this.rules = rules;
       this.T = rules.types.length;
@@ -187,6 +223,7 @@
       this.D = offsets.length;
       this.stability = Math.max(0, Number(opts.stability) || 0);
       this.nearCounts = new Int32Array(this.T);
+      this._buildClimate(opts.climate, opts.seed);
       this._buildContinents(opts.continents, opts.seed);
 
       this.dom = new Uint32Array(this.N);
@@ -266,6 +303,7 @@
     // The types a cell can still become, with the weights it would roll with right now.
     optionsFor(c) {
       const { T, dom, D, DX, DY, W, H, stability, nearCounts, contShare, contStrength, contNeutral } = this;
+      const { climShare, Z } = this;
       const { weight, near } = this.rules;
       const x = c % W;
       const y = (c / W) | 0;
@@ -305,6 +343,13 @@
         if (contShare) {
           const k = this.rules.continent[t];
           w *= k >= 0 ? Math.exp(contStrength * contShare[c * this.K + k]) : contNeutral;
+        }
+        // Climate: blend the zones' multipliers for this type by how much of each zone the cell is in.
+        if (climShare) {
+          const typeMult = this.rules.climate.typeMult;
+          let f = 0;
+          for (let z = 0; z < Z; z++) f += climShare[c * Z + z] * typeMult[z * T + t];
+          w *= this.climStrength === 1 ? f : Math.pow(f, this.climStrength);
         }
         // Stability: the more settled neighbours already have this type, the likelier it gets.
         // The weight is multiplied by e^(stability × share of settled neighbours with this type),
@@ -393,6 +438,62 @@
 
     // ---- internals --------------------------------------------------------
 
+    // Climate zones: latitude bands from the equator (zone 0) to the poles (last zone). With layout
+    // 'both' the equator runs across the middle and the bands mirror toward the top and bottom; with
+    // 'north' it runs along the bottom. A seeded wobble keeps the borders from being straight, and
+    // each cell gets a smooth share of the nearest zones so they blend instead of switching.
+    _buildClimate(cl, seed) {
+      this.climShare = null;
+      const Z = (this.Z = this.rules.climate.zones.length);
+      const strength = cl ? Number(cl.strength) : 0;
+      if (!(strength > 0 && Z > 0)) return;
+
+      const { W, H, N } = this;
+      const rng = makeRng((seed ^ 0x2c1b3c6d) >>> 0);
+      const TAU = Math.PI * 2;
+      const wave = () => ({ fx: (TAU * (1 + rng() * 2)) / W, fy: (TAU * (rng() * 2)) / H, phase: rng() * TAU });
+      this.climBoth = cl.layout !== 'north';
+      this.climWaves = [wave(), wave(), wave()];
+      this.climStrength = strength;
+
+      const share = new Float32Array(N * Z);
+      const zones = new Float64Array(Z);
+      for (let c = 0; c < N; c++) {
+        this._zoneShares((c % W) + 0.5, ((c / W) | 0) + 0.5, zones);
+        for (let z = 0; z < Z; z++) share[c * Z + z] = zones[z];
+      }
+      this.climShare = share;
+    }
+
+    // Fills `out` with how much of each climate zone the point (x, y) is in; the shares add up to 1.
+    _zoneShares(x, y, out) {
+      const Z = this.Z;
+      const v = y / this.H;
+      let lat = this.climBoth ? Math.abs(2 * v - 1) : 1 - v; // 0 = equator, 1 = pole
+      const [a, b, c] = this.climWaves;
+      lat +=
+        0.07 * (0.5 * Math.sin(x * a.fx + y * a.fy + a.phase) +
+          0.3 * Math.sin(x * b.fx * 2 + y * b.fy + b.phase) +
+          0.2 * Math.sin(x * c.fx * 3 + y * c.fy * 2 + c.phase));
+      lat = Math.min(1, Math.max(0, lat));
+      const width = 0.55 / Z;
+      let total = 0;
+      for (let z = 0; z < Z; z++) {
+        const d = (lat - (z + 0.5) / Z) / width;
+        out[z] = Math.exp(-d * d);
+        total += out[z];
+      }
+      for (let z = 0; z < Z; z++) out[z] /= total;
+    }
+
+    // The climate zone a cell is mostly in, or -1 when climate zones are off.
+    zoneAt(c) {
+      if (!this.climShare) return -1;
+      let best = 0;
+      for (let z = 1; z < this.Z; z++) if (this.climShare[c * this.Z + z] > this.climShare[c * this.Z + best]) best = z;
+      return best;
+    }
+
     // Continental layer: a few random points, each of one kind (water, land, desert, …). Every cell
     // gets a share of each kind, weighting the points by inverse square distance, so a cell right
     // next to a water point is ~100% water and one halfway between a water and a land point is
@@ -412,15 +513,31 @@
       const rng = makeRng((seed ^ 0x5bd1e995) >>> 0);
       // The two most likely kinds always get a point, so a map can't end up with no sea or no land.
       const byOdds = kinds.map((k, i) => i).sort((a, b) => kinds[b].odds - kinds[a].odds);
-      const totalOdds = kinds.reduce((a, k) => a + k.odds, 0);
+      const odds = new Float64Array(K);
+      const zones = new Float64Array(this.Z);
       for (let i = 0; i < count; i++) {
+        const x = rng() * W;
+        const y = rng() * H;
         let k = byOdds[i];
         if (i >= Math.min(2, K)) {
-          let r = rng() * totalOdds;
-          k = totalOdds > 0 ? kinds.findIndex((o) => (r -= o.odds) < 0) : (rng() * K) | 0;
+          // Each kind's odds, times what the climate at this spot thinks of it.
+          if (this.climShare) this._zoneShares(x, y, zones);
+          let total = 0;
+          for (let kk = 0; kk < K; kk++) {
+            let o = kinds[kk].odds;
+            if (this.climShare) {
+              let f = 0;
+              for (let z = 0; z < this.Z; z++) f += zones[z] * this.rules.climate.kindMult[z * K + kk];
+              o *= Math.pow(f, this.climStrength);
+            }
+            odds[kk] = o;
+            total += o;
+          }
+          let r = rng() * total;
+          k = total > 0 ? odds.findIndex((o) => (r -= o) < 0) : (rng() * K) | 0;
           if (k < 0) k = K - 1;
         }
-        this.contPoints.push({ x: rng() * W, y: rng() * H, k, kind: kinds[k] });
+        this.contPoints.push({ x, y, k, kind: kinds[k] });
       }
 
       const share = new Float32Array(N * K);
