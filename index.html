@@ -124,6 +124,12 @@
           <input id="jitter" type="range" min="0" max="1" step="0.01" value="0.35">
           <output id="jitterOut"></output>
         </div>
+        <label class="check"><input id="textures" type="checkbox" checked> Textures (repeating icons per terrain type)</label>
+        <label class="field slider-label" for="iconSize">Icon size</label>
+        <div class="speed">
+          <input id="iconSize" type="range" min="8" max="40" step="1" value="16">
+          <output id="iconSizeOut"></output>
+        </div>
       </section>
 
       <div class="error" id="error" hidden></div>
@@ -147,6 +153,7 @@
   </main>
 
   <script src="wfc.js"></script>
+  <script src="patterns.js"></script>
   <script src="editor.js"></script>
   <script src="main.js"></script>
 </body>

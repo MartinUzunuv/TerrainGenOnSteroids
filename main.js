@@ -35,6 +35,9 @@
     speedOut: $('speedOut'),
     instant: $('instant'),
     voronoi: $('voronoi'),
+    textures: $('textures'),
+    iconSize: $('iconSize'),
+    iconSizeOut: $('iconSizeOut'),
     jitter: $('jitter'),
     jitterOut: $('jitterOut'),
     types: $('types'),
@@ -168,6 +171,7 @@
         color: toHex(parseColor(t.color, t.id)),
         weight: t.weight,
         continent: t.continent,
+        pattern: t.pattern,
         neighbors: compiled.types.filter((_, j) => (compiled.allowed[i] >>> j) & 1).map((o) => o.id),
         weightNear: Object.fromEntries(
           compiled.types.map((o, j) => [o.id, compiled.near[i * T + j]]).filter(([, v]) => !Number.isNaN(v))
@@ -181,12 +185,13 @@
       version: config.version,
       continents: config.continents,
       climates: config.climates,
-      types: config.types.map(({ id, name, color, weight, continent, neighbors, weightNear }) => ({
+      types: config.types.map(({ id, name, color, weight, continent, pattern, neighbors, weightNear }) => ({
         id,
         name,
         color,
         weight,
         ...(continent ? { continent } : {}),
+        ...(pattern ? { pattern } : {}),
         neighbors,
         ...(Object.keys(weightNear).length ? { weightNear } : {}),
       })),
@@ -273,8 +278,11 @@
         return;
       }
       if (kind === 'color' && !regenTimer && rules && rules.types.length === config.types.length) {
+        // Colours and textures only change the drawing: repaint without a new map.
         typeRgb = config.types.map((t) => parseColor(t.color, t.id));
+        config.types.forEach((t, i) => (rules.types[i].pattern = t.pattern));
         maskColors = new Map();
+        buildTiles();
         if (solver) {
           solver.markAllDirty();
           draw();
@@ -381,12 +389,15 @@
     let w = solver.W;
     let h = solver.H;
     vor = null;
-    if (ui.voronoi.checked) {
+    // Voronoi shapes and textures both need a full-resolution pixel map; textures on plain squares
+    // use the same map with no point offset.
+    if (ui.voronoi.checked || ui.textures.checked) {
       const scale = Math.max(1, Math.min(cs, Math.floor(Math.sqrt(MAX_VORONOI_PIXELS / solver.N))));
-      vor = buildVoronoi(solver.W, solver.H, scale, Number(ui.jitter.value));
+      vor = buildVoronoi(solver.W, solver.H, scale, ui.voronoi.checked ? Number(ui.jitter.value) : 0);
       w = vor.w;
       h = vor.h;
     }
+    buildTiles();
     if (!off || off.width !== w || off.height !== h) {
       off = document.createElement('canvas');
       off.width = w;
@@ -454,7 +465,28 @@
     const list = new Int32Array(owner.length);
     for (let p = 0; p < owner.length; p++) list[fill[owner[p]]++] = p;
 
-    return { w: vw, h: vh, owner, start, list };
+    return { w: vw, h: vh, scale, owner, start, list };
+  }
+
+  // One pre-painted texture tile per terrain type (null = no texture), sized in image pixels.
+  let tiles = null;
+  let tileSize = 16;
+
+  function buildTiles() {
+    tiles = null;
+    if (!ui.textures.checked || !vor || !rules) return;
+    const cs = readInt(ui.cellSize, 1, 40, 6);
+    const S = Math.max(4, Math.round((Number(ui.iconSize.value) * vor.scale) / cs));
+    tileSize = S;
+    const canvas = document.createElement('canvas');
+    canvas.width = S;
+    canvas.height = S;
+    const tctx = canvas.getContext('2d', { willReadFrequently: true });
+    tiles = rules.types.map((t, i) => {
+      tctx.clearRect(0, 0, S, S);
+      if (!typeRgb[i] || !window.TerrainPatterns.paintTile(tctx, t.pattern, S, typeRgb[i])) return null;
+      return new Uint32Array(tctx.getImageData(0, 0, S, S).data.buffer);
+    });
   }
 
   function schedule() {
@@ -524,10 +556,22 @@
   function draw() {
     if (!solver) return;
     if (vor) {
-      const { start, list } = vor;
+      const { start, list, w: vw } = vor;
+      const S = tileSize;
       solver.consumeDirty((c, m) => {
-        const col = maskColor(m);
-        for (let i = start[c], end = start[c + 1]; i < end; i++) pixels[list[i]] = col;
+        // Settled cells with a texture copy their pixels from the type's tile; the tile is
+        // anchored to the image, so the pattern runs on seamlessly across neighbouring cells.
+        const tile = tiles && m !== 0 && (m & (m - 1)) === 0 ? tiles[31 - Math.clz32(m)] : null;
+        if (tile) {
+          for (let i = start[c], end = start[c + 1]; i < end; i++) {
+            const p = list[i];
+            const x = p % vw;
+            pixels[p] = tile[(((p - x) / vw) % S) * S + (x % S)];
+          }
+        } else {
+          const col = maskColor(m);
+          for (let i = start[c], end = start[c + 1]; i < end; i++) pixels[list[i]] = col;
+        }
       });
     } else {
       solver.consumeDirty((c, m) => {
@@ -690,6 +734,23 @@
     updateJitterLabel();
     setupSurface();
   });
+
+  function updateTextureLabel() {
+    ui.iconSize.disabled = !ui.textures.checked;
+    ui.iconSizeOut.textContent = `${ui.iconSize.value} px`;
+  }
+  ui.textures.addEventListener('change', () => {
+    updateTextureLabel();
+    setupSurface();
+  });
+  ui.iconSize.addEventListener('input', () => {
+    updateTextureLabel();
+    buildTiles();
+    if (solver) {
+      solver.markAllDirty();
+      draw();
+    }
+  });
   ui.jitter.addEventListener('input', () => {
     updateJitterLabel();
     // Rebuilding the pixel map can take tens of ms; do it at most once per frame while dragging.
@@ -836,6 +897,7 @@
 
   updateSpeedLabel();
   updateJitterLabel();
+  updateTextureLabel();
   updateRadiusLabel();
   updateStabilityLabel();
   updateContinentLabels();
@@ -861,8 +923,12 @@
     saved.continents = kinds;
     for (const d of defaults.types) {
       const t = saved.types.find((o) => o.id === d.id);
-      if (!t) saved.types.push(d);
-      else if (!t.continent && d.continent) t.continent = d.continent;
+      if (!t) {
+        saved.types.push(d);
+        continue;
+      }
+      if (!t.continent && d.continent) t.continent = d.continent;
+      if (t.pattern === undefined && d.pattern) t.pattern = d.pattern;
     }
     if (!Array.isArray(saved.climates) && Array.isArray(defaults.climates)) {
       // Keep only references to kinds and types the user still has.

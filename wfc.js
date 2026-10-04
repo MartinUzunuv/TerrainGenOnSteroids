@@ -194,6 +194,7 @@
         color: d.color !== undefined ? String(d.color) : '#ff00ff',
         weight: w,
         continent: continent[i] >= 0 ? kinds[continent[i]].id : '',
+        pattern: d.pattern ? String(d.pattern) : '', // texture, only used for drawing
       };
     });
 

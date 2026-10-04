@@ -224,6 +224,16 @@
         continentSel.append(h('option', { value, selected: (t.continent || '') === value }, label));
       }
 
+      const patternSel = h('select', {
+        onchange: () => {
+          t.pattern = patternSel.value;
+          onChange('color'); // drawing only, no new map
+        },
+      });
+      for (const [value, label] of global.TerrainPatterns.LIST) {
+        patternSel.append(h('option', { value, selected: (t.pattern || '') === value }, label));
+      }
+
       function renderChips() {
         chips.textContent = '';
         for (const o of types()) {
@@ -314,7 +324,10 @@
           h('label', {}, 'Colour', colorIn),
           h('label', {}, 'Weight', weightIn)
         ),
-        h('label', { class: 'f-continent' }, 'Continental layer: favoured near', continentSel),
+        h('div', { class: 'type-fields type-extra' },
+          h('label', { class: 'f-continent' }, 'Favoured near (continental)', continentSel),
+          h('label', { class: 'f-continent' }, 'Texture', patternSel)
+        ),
         h('div', { class: 'sub' }, 'Can be next to'),
         chips,
         warn,
