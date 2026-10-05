@@ -18,6 +18,7 @@
     width: $('width'),
     height: $('height'),
     cellSize: $('cellSize'),
+    shape: $('shape'),
     selection: $('selection'),
     radius: $('radius'),
     radiusOut: $('radiusOut'),
@@ -38,6 +39,11 @@
     textures: $('textures'),
     iconSize: $('iconSize'),
     iconSizeOut: $('iconSizeOut'),
+    view3d: $('view3d'),
+    resetCamera: $('resetCamera'),
+    height3d: $('height3d'),
+    height3dOut: $('height3dOut'),
+    canvasWrap: document.querySelector('.canvas-wrap'),
     jitter: $('jitter'),
     jitterOut: $('jitterOut'),
     types: $('types'),
@@ -82,6 +88,12 @@
   let vor = null; // Voronoi pixel map, or null when drawing plain squares
   let vorRebuild = 0;
   let autoCleaned = false; // whether this map already got its automatic cleanup passes
+  let view = null; // the 3D view while it's switched on
+  let viewModule = null;
+  const maskHeights = new Map(); // mask -> average 3D height of the types it allows
+  let roughness = null; // per cell, -1…1: small bumps so flat areas don't look like plastic
+  let heightBuf = null;
+  let blurBuf = null;
 
   // ---- colours --------------------------------------------------------------
 
@@ -170,6 +182,7 @@
         name: t.name,
         color: toHex(parseColor(t.color, t.id)),
         weight: t.weight,
+        height: t.height,
         continent: t.continent,
         pattern: t.pattern,
         neighbors: compiled.types.filter((_, j) => (compiled.allowed[i] >>> j) & 1).map((o) => o.id),
@@ -185,11 +198,12 @@
       version: config.version,
       continents: config.continents,
       climates: config.climates,
-      types: config.types.map(({ id, name, color, weight, continent, pattern, neighbors, weightNear }) => ({
+      types: config.types.map(({ id, name, color, weight, height, continent, pattern, neighbors, weightNear }) => ({
         id,
         name,
         color,
         weight,
+        height,
         ...(continent ? { continent } : {}),
         ...(pattern ? { pattern } : {}),
         neighbors,
@@ -237,6 +251,7 @@
       rules = compileRules(config);
       typeRgb = config.types.map((t) => parseColor(t.color, t.id));
       maskColors = new Map();
+      maskHeights.clear();
     } catch (err) {
       showError(err.message);
       return;
@@ -280,8 +295,9 @@
       if (kind === 'color' && !regenTimer && rules && rules.types.length === config.types.length) {
         // Colours and textures only change the drawing: repaint without a new map.
         typeRgb = config.types.map((t) => parseColor(t.color, t.id));
-        config.types.forEach((t, i) => (rules.types[i].pattern = t.pattern));
+        config.types.forEach((t, i) => Object.assign(rules.types[i], { pattern: t.pattern, height: t.height }));
         maskColors = new Map();
+        maskHeights.clear();
         buildTiles();
         if (solver) {
           solver.markAllDirty();
@@ -345,7 +361,9 @@
     if (!rules) return;
     stop();
     if (solverError) showError('');
+    const sphere = ui.shape.value === 'sphere';
     const width = readInt(ui.width, 5, 1000, 160);
+    if (sphere) ui.height.value = Math.max(5, Math.round(width / 2)); // a globe's map is 2:1
     const height = readInt(ui.height, 5, 1000, 100);
     const seedText = ui.seed.value.trim();
     seedUsed = seedText ? seedFromString(seedText) : (Math.random() * 2 ** 32) >>> 0;
@@ -355,6 +373,7 @@
       width,
       height,
       radius2: RADIUS_STEPS[Number(ui.radius.value)].radius2,
+      wrapX: sphere,
       stability: ui.stability.checked ? stabilityStrength() : 0,
       continents: ui.continents.checked
         ? { count: Number(ui.contPoints.value), strength: Number(ui.contStrength.value) }
@@ -373,6 +392,8 @@
     const rng = makeRng(seedUsed ^ 0x9e3779b9);
     offsets = new Float32Array(solver.N * 2);
     for (let i = 0; i < offsets.length; i++) offsets[i] = rng() * 2 - 1;
+    roughness = new Float32Array(solver.N);
+    for (let i = 0; i < roughness.length; i++) roughness[i] = rng() * 2 - 1;
 
     setupSurface();
     schedule();
@@ -393,11 +414,12 @@
     // use the same map with no point offset.
     if (ui.voronoi.checked || ui.textures.checked) {
       const scale = Math.max(1, Math.min(cs, Math.floor(Math.sqrt(MAX_VORONOI_PIXELS / solver.N))));
-      vor = buildVoronoi(solver.W, solver.H, scale, ui.voronoi.checked ? Number(ui.jitter.value) : 0);
+      vor = buildVoronoi(solver.W, solver.H, scale, ui.voronoi.checked ? Number(ui.jitter.value) : 0, solver.wrapX);
       w = vor.w;
       h = vor.h;
     }
     buildTiles();
+    if (view) view.setMap(solver.W, solver.H, ui.canvas, { sphere: solver.wrapX });
     if (!off || off.width !== w || off.height !== h) {
       off = document.createElement('canvas');
       off.width = w;
@@ -413,7 +435,7 @@
   // Each cell is a point at its centre, moved by up to `jitter` cells in x and y. Every pixel of
   // the scale×scale-per-cell image belongs to the nearest point. Returns that ownership both ways:
   // owner[pixel] -> cell, and list[start[cell] .. start[cell + 1]) -> the cell's pixels.
-  function buildVoronoi(W, H, scale, jitter) {
+  function buildVoronoi(W, H, scale, jitter, wrapX) {
     const N = W * H;
     const vw = W * scale;
     const vh = H * scale;
@@ -428,12 +450,22 @@
     // point k cells over is at least k − 1 − jitter away, so anything beyond R can't be nearer.
     const R = Math.floor(1 + Math.SQRT1_2 + (1 + Math.SQRT2) * jitter);
     const cand = new Int32Array((2 * R + 1) ** 2);
+    const candDx = new Float32Array(cand.length); // ±W for points seen across the sphere's seam
     const owner = new Int32Array(vw * vh);
     for (let cy = 0; cy < H; cy++) {
       for (let cx = 0; cx < W; cx++) {
         let n = 0;
         for (let y = Math.max(0, cy - R); y <= Math.min(H - 1, cy + R); y++) {
-          for (let x = Math.max(0, cx - R); x <= Math.min(W - 1, cx + R); x++) cand[n++] = y * W + x;
+          for (let x = cx - R; x <= cx + R; x++) {
+            if (x >= 0 && x < W) {
+              candDx[n] = 0;
+              cand[n++] = y * W + x;
+            } else if (wrapX) {
+              const wx = x < 0 ? x + W : x - W;
+              candDx[n] = x - wx;
+              cand[n++] = y * W + wx;
+            }
+          }
         }
         for (let sy = 0; sy < scale; sy++) {
           const v = cy + (sy + 0.5) / scale;
@@ -444,7 +476,7 @@
             let bestD = Infinity;
             for (let k = 0; k < n; k++) {
               const c = cand[k];
-              const dx = ptX[c] - u;
+              const dx = ptX[c] + candDx[k] - u;
               const dy = ptY[c] - v;
               const d = dx * dx + dy * dy;
               if (d < bestD) {
@@ -584,6 +616,100 @@
     if (ui.contShow.checked) drawContinentPoints();
     updatePanel();
     updateHover();
+    update3d();
+  }
+
+  // ---- 3D view ------------------------------------------------------------------
+
+  function maskHeight(m) {
+    let v = maskHeights.get(m);
+    if (v !== undefined) return v;
+    let sum = 0;
+    let n = 0;
+    for (let t = 0; t < rules.types.length; t++) {
+      if ((m >>> t) & 1) {
+        sum += rules.types[t].height;
+        n++;
+      }
+    }
+    v = n ? sum / n : 0;
+    maskHeights.set(m, v);
+    return v;
+  }
+
+  // Height of every cell in world units: its type's height (or the average of what it can still
+  // become), plus a little roughness, smoothed into slopes and scaled with the map size.
+  function computeHeights() {
+    const { W, H, N, dom } = solver;
+    if (!heightBuf || heightBuf.length !== N) {
+      heightBuf = new Float32Array(N);
+      blurBuf = new Float32Array(N);
+    }
+    for (let c = 0; c < N; c++) {
+      const h = maskHeight(dom[c]);
+      heightBuf[c] = h + 0.15 * Math.abs(h) * roughness[c];
+    }
+    // Two 3×3 box blurs turn type steps into slopes.
+    for (let pass = 0; pass < 2; pass++) {
+      const src = pass === 0 ? heightBuf : blurBuf;
+      const dst = pass === 0 ? blurBuf : heightBuf;
+      for (let y = 0; y < H; y++) {
+        const y0 = y > 0 ? y - 1 : y;
+        const y1 = y < H - 1 ? y + 1 : y;
+        for (let x = 0; x < W; x++) {
+          const x0 = x > 0 ? x - 1 : x;
+          const x1 = x < W - 1 ? x + 1 : x;
+          let s = 0;
+          let n = 0;
+          for (let yy = y0; yy <= y1; yy++) {
+            for (let xx = x0; xx <= x1; xx++) {
+              s += src[yy * W + xx];
+              n++;
+            }
+          }
+          dst[y * W + x] = s / n;
+        }
+      }
+    }
+    // On a globe heights are relative to its radius (width / 2π), so mountains stay hills, not spikes.
+    const scale = Number(ui.height3d.value) * (solver.wrapX ? (W / (2 * Math.PI)) * 0.03 : Math.max(W, H) / 50);
+    for (let c = 0; c < N; c++) heightBuf[c] *= scale;
+    return heightBuf;
+  }
+
+  function update3d() {
+    if (!view || !solver) return;
+    view.textureChanged();
+    view.setHeights(computeHeights());
+  }
+
+  async function setView3d(on) {
+    if (on && !view) {
+      try {
+        viewModule = viewModule || (await import('./view3d.js'));
+      } catch (err) {
+        ui.view3d.checked = false;
+        showError(
+          `Couldn't load the 3D viewer (${err.message}). ` +
+          'It downloads three.js from cdn.jsdelivr.net the first time, so it needs an internet connection.'
+        );
+        return;
+      }
+      if (!ui.view3d.checked || view) return; // switched off again while loading
+      view = viewModule.createView(ui.canvasWrap);
+      ui.canvasWrap.classList.add('is-3d');
+      if (solver) {
+        view.setMap(solver.W, solver.H, ui.canvas, { sphere: solver.wrapX });
+        update3d();
+      }
+    } else if (!on && view) {
+      view.dispose();
+      view = null;
+      ui.canvasWrap.classList.remove('is-3d');
+    }
+    ui.resetCamera.disabled = !view;
+    ui.height3d.disabled = !view;
+    updateHover();
   }
 
   function drawContinentPoints() {
@@ -656,6 +782,10 @@
 
   function updateHover() {
     const el = ui.hover;
+    if (view) {
+      el.textContent = '3D view: drag to rotate, right-drag to pan, scroll to zoom.';
+      return;
+    }
     if (!solver || hoverCell < 0 || hoverCell >= solver.N) {
       el.textContent = HOVER_HINT;
       return;
@@ -726,6 +856,22 @@
   });
   ui.cellSize.addEventListener('change', setupSurface);
 
+  // Sphere worlds need a 2:1 map, so the height follows the width; picking Sphere also opens the
+  // 3D view, since that's where the globe shows.
+  function updateShapeControls() {
+    const sphere = ui.shape.value === 'sphere';
+    ui.height.disabled = sphere;
+    ui.height.title = sphere ? 'Set automatically to width ÷ 2 for a sphere' : '';
+  }
+  ui.shape.addEventListener('change', () => {
+    updateShapeControls();
+    generate();
+    if (ui.shape.value === 'sphere' && !ui.view3d.checked) {
+      ui.view3d.checked = true;
+      setView3d(true);
+    }
+  });
+
   function updateJitterLabel() {
     ui.jitter.disabled = !ui.voronoi.checked;
     ui.jitterOut.textContent = `${Number(ui.jitter.value).toFixed(2)} cells`;
@@ -742,6 +888,16 @@
   ui.textures.addEventListener('change', () => {
     updateTextureLabel();
     setupSurface();
+  });
+
+  function updateHeightLabel() {
+    ui.height3dOut.textContent = `×${Number(ui.height3d.value).toFixed(1)}`;
+  }
+  ui.view3d.addEventListener('change', () => setView3d(ui.view3d.checked));
+  ui.resetCamera.addEventListener('click', () => view && view.resetCamera());
+  ui.height3d.addEventListener('input', () => {
+    updateHeightLabel();
+    update3d();
   });
   ui.iconSize.addEventListener('input', () => {
     updateTextureLabel();
@@ -898,6 +1054,10 @@
   updateSpeedLabel();
   updateJitterLabel();
   updateTextureLabel();
+  updateHeightLabel();
+  updateShapeControls();
+  ui.resetCamera.disabled = true;
+  ui.height3d.disabled = true;
   updateRadiusLabel();
   updateStabilityLabel();
   updateContinentLabels();
@@ -929,6 +1089,7 @@
       }
       if (!t.continent && d.continent) t.continent = d.continent;
       if (t.pattern === undefined && d.pattern) t.pattern = d.pattern;
+      if (t.height === undefined && d.height !== undefined) t.height = d.height;
     }
     if (!Array.isArray(saved.climates) && Array.isArray(defaults.climates)) {
       // Keep only references to kinds and types the user still has.

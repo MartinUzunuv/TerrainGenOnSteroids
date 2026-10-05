@@ -188,11 +188,15 @@
         }
       }
 
+      const height = d.height === undefined ? 0.5 : Number(d.height);
+      if (!Number.isFinite(height)) throw new Error(`"${id}".height must be a number.`);
+
       return {
         id,
         name: d.name !== undefined ? String(d.name) : id,
         color: d.color !== undefined ? String(d.color) : '#ff00ff',
         weight: w,
+        height, // 3D view only; 0 = sea level
         continent: continent[i] >= 0 ? kinds[continent[i]].id : '',
         pattern: d.pattern ? String(d.pattern) : '', // texture, only used for drawing
       };
@@ -208,6 +212,7 @@
     // stability: how strongly a cell copies its settled neighbours (0 = off), see optionsFor
     // continents: { count, strength } for the continental layer, or null for off
     // climate: { strength, layout: 'both'|'north' } for climate zones, or null for off
+    // wrapX: true for a sphere world, where the left and right edges are neighbours
     constructor(rules, opts) {
       this.rules = rules;
       this.T = rules.types.length;
@@ -215,6 +220,7 @@
       this.H = opts.height;
       this.N = this.W * this.H;
       this.selection = opts.selection === 'entropy' ? 'entropy' : 'random';
+      this.wrapX = !!opts.wrapX;
       this.rng = makeRng(opts.seed);
       this.full = this.T === 32 ? 0xffffffff : 2 ** this.T - 1;
 
@@ -313,9 +319,13 @@
       let settled = 0;
       nearCounts.fill(0); // how many settled neighbours have each type
       for (let k = 0; k < D; k++) {
-        const nx = x + DX[k];
+        let nx = x + DX[k];
         const ny = y + DY[k];
-        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        if (ny < 0 || ny >= H) continue;
+        if (nx < 0 || nx >= W) {
+          if (!this.wrapX) continue;
+          nx += nx < 0 ? W : -W; // sphere: the left and right edges touch
+        }
         const nm = dom[ny * W + nx];
         if (nm !== 0 && (nm & (nm - 1)) === 0) {
           nearMask |= nm;
@@ -400,9 +410,13 @@
         let total = 0;
         let around = 0; // mask of every type next to this cell
         for (let k = 0; k < D; k++) {
-          const nx = x + DX[k];
+          let nx = x + DX[k];
           const ny = y + DY[k];
-          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          if (ny < 0 || ny >= H) continue;
+          if (nx < 0 || nx >= W) {
+            if (!this.wrapX) continue;
+            nx += nx < 0 ? W : -W; // sphere: the left and right edges touch
+          }
           const m = dom[ny * W + nx];
           around = (around | m) >>> 0;
           nearCounts[31 - Math.clz32(m)]++;
@@ -452,7 +466,8 @@
       const { W, H, N } = this;
       const rng = makeRng((seed ^ 0x2c1b3c6d) >>> 0);
       const TAU = Math.PI * 2;
-      const wave = () => ({ fx: (TAU * (1 + rng() * 2)) / W, fy: (TAU * (rng() * 2)) / H, phase: rng() * TAU });
+      // Whole numbers of waves across the width, so the wobble lines up where a sphere wraps around.
+      const wave = () => ({ fx: (TAU * Math.floor(1 + rng() * 3)) / W, fy: (TAU * (rng() * 2)) / H, phase: rng() * TAU });
       this.climBoth = cl.layout !== 'north';
       this.climWaves = [wave(), wave(), wave()];
       this.climStrength = strength;
@@ -549,7 +564,8 @@
         sums.fill(0);
         let total = 0;
         for (const p of this.contPoints) {
-          const dx = p.x - x;
+          let dx = p.x - x;
+          if (this.wrapX) dx -= W * Math.round(dx / W); // shortest way round the sphere
           const dy = p.y - y;
           const w = 1 / (dx * dx + dy * dy + 1);
           sums[p.k] += w;
@@ -656,9 +672,13 @@
         const x = c % W;
         const y = (c / W) | 0;
         for (let k = 0; k < D; k++) {
-          const nx = x + DX[k];
+          let nx = x + DX[k];
           const ny = y + DY[k];
-          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          if (ny < 0 || ny >= H) continue;
+          if (nx < 0 || nx >= W) {
+            if (!this.wrapX) continue;
+            nx += nx < 0 ? W : -W; // sphere: the left and right edges touch
+          }
           const n = ny * W + nx;
           if (seen[n] !== stamp) {
             seen[n] = stamp;
@@ -743,9 +763,13 @@
         const x = c % W;
         const y = (c / W) | 0;
         for (let k = 0; k < D; k++) {
-          const nx = x + DX[k];
+          let nx = x + DX[k];
           const ny = y + DY[k];
-          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          if (ny < 0 || ny >= H) continue;
+          if (nx < 0 || nx >= W) {
+            if (!this.wrapX) continue;
+            nx += nx < 0 ? W : -W; // sphere: the left and right edges touch
+          }
           const n = ny * W + nx;
           const m = dom[n];
           const m2 = (m & compat) >>> 0;

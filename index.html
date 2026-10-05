@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Terrain Generator</title>
   <link rel="stylesheet" href="style.css">
+  <!-- three.js for the 3D view; only downloaded the first time 3D is switched on -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
   <main class="app">
@@ -37,6 +46,12 @@
           <label>Height <input id="height" type="number" min="5" max="1000" value="100"></label>
           <label>Cell px <input id="cellSize" type="number" min="1" max="40" value="6"></label>
         </div>
+        <label class="field shape-field">World shape
+          <select id="shape">
+            <option value="flat">Flat</option>
+            <option value="sphere">Sphere (edges wrap around; a globe in 3D)</option>
+          </select>
+        </label>
       </section>
 
       <section class="group">
@@ -129,6 +144,15 @@
         <div class="speed">
           <input id="iconSize" type="range" min="8" max="40" step="1" value="16">
           <output id="iconSizeOut"></output>
+        </div>
+        <div class="check-row">
+          <label class="check"><input id="view3d" type="checkbox"> 3D view</label>
+          <button id="resetCamera" class="small" type="button" title="Back to the starting angle">Reset camera</button>
+        </div>
+        <label class="field slider-label" for="height3d">Height exaggeration</label>
+        <div class="speed">
+          <input id="height3d" type="range" min="0" max="3" step="0.1" value="1">
+          <output id="height3dOut"></output>
         </div>
       </section>
 

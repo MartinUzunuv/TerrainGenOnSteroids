@@ -97,7 +97,7 @@
 
     function addType() {
       if (types().length >= MAX_TYPES) return;
-      const t = { id: '', name: 'New type', color: randomColor(), weight: 0.1, continent: '', neighbors: [], weightNear: {} };
+      const t = { id: '', name: 'New type', color: randomColor(), weight: 0.1, height: 0.5, continent: '', pattern: '', neighbors: [], weightNear: {} };
       t.id = uniqueId(slug(t.name));
       t.neighbors.push(t.id);
       types().push(t);
@@ -234,6 +234,18 @@
         patternSel.append(h('option', { value, selected: (t.pattern || '') === value }, label));
       }
 
+      const heightIn = h('input', {
+        type: 'number',
+        step: 0.1,
+        value: t.height,
+        title: 'Height in the 3D view; 0 is sea level, below 0 is underwater',
+        oninput: () => {
+          const v = parseFloat(heightIn.value);
+          t.height = Number.isFinite(v) ? v : 0;
+          onChange('color'); // drawing only, no new map
+        },
+      });
+
       function renderChips() {
         chips.textContent = '';
         for (const o of types()) {
@@ -326,7 +338,8 @@
         ),
         h('div', { class: 'type-fields type-extra' },
           h('label', { class: 'f-continent' }, 'Favoured near (continental)', continentSel),
-          h('label', { class: 'f-continent' }, 'Texture', patternSel)
+          h('label', { class: 'f-continent' }, 'Texture', patternSel),
+          h('label', { class: 'f-continent' }, '3D height', heightIn)
         ),
         h('div', { class: 'sub' }, 'Can be next to'),
         chips,

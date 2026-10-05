@@ -119,6 +119,13 @@ label { display: block; color: var(--muted); font-size: 12px; }
 
 .check { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 13px; color: var(--text); }
 .check.first { margin-top: 0; }
+.shape-field { margin-top: 8px; }
+.check-row { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.check-row .check { margin-top: 0; }
+
+.canvas-wrap.is-3d #map { display: none; }
+.view3d { display: block; width: 100%; height: 100%; border-radius: 4px; cursor: grab; }
+.view3d:active { cursor: grabbing; }
 .slider-label { margin-top: 10px; }
 .speed { display: flex; align-items: center; gap: 10px; }
 .speed input { flex: 1; accent-color: var(--accent); }
@@ -176,7 +183,8 @@ button.small, .small-actions button, .small-actions .button { padding: 4px 10px;
 .type-fields input { margin-top: 3px; }
 .type-fields input[type="color"] { height: 30px; padding: 2px; cursor: pointer; }
 .f-continent select { margin-top: 3px; }
-.type-extra { grid-template-columns: 1fr 1fr; }
+.type-extra { grid-template-columns: 1fr 1fr 64px; }
+.type-extra input { margin-top: 3px; }
 
 .sub-head { margin: 14px 0 6px; }
 h3 { font-size: 12px; font-weight: 600; margin: 0; color: var(--text); }
