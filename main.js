@@ -67,6 +67,7 @@
     resetTypes: $('resetTypes'),
     error: $('error'),
     savePng: $('savePng'),
+    saveSvg: $('saveSvg'),
   };
   const ctx = ui.canvas.getContext('2d');
   const HOVER_HINT = 'Hover over a cell to see what it can still become.';
@@ -1223,6 +1224,53 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     });
+  });
+
+  // The finished map as SVG text: the same cell points as the 2D view (Voronoi offsets if that's
+  // on, plain squares if not), flat type colours.
+  async function buildSvg() {
+    const mod = await import('./svgexport.js');
+    const { W, H, N } = solver;
+    const jitter = ui.voronoi.checked ? Number(ui.jitter.value) : 0;
+    const ptX = new Float32Array(N);
+    const ptY = new Float32Array(N);
+    for (let c = 0; c < N; c++) {
+      ptX[c] = (c % W) + 0.5 + jitter * offsets[2 * c];
+      ptY[c] = ((c / W) | 0) + 0.5 + jitter * offsets[2 * c + 1];
+    }
+    return mod.mapToSvg({
+      W,
+      H,
+      cellPx: readInt(ui.cellSize, 1, 40, 6),
+      ptX,
+      ptY,
+      typeAt: (c) => solver.typeAt(c),
+      types: rules.types.map((t, i) => ({ id: t.id, name: t.name, color: toHex(typeRgb[i]) })),
+      wrapX: solver.wrapX,
+    });
+  }
+
+  ui.saveSvg.addEventListener('click', async () => {
+    if (!solver) return;
+    if (solver.status !== 'done') {
+      showError('Let the map finish generating before saving it as SVG.');
+      return;
+    }
+    let svg;
+    try {
+      svg = await buildSvg();
+    } catch (err) {
+      showError(
+        `Couldn't build the SVG (${err.message}). The exporter downloads a small library ` +
+        '(Delaunator) from cdn.jsdelivr.net the first time, so it needs an internet connection.'
+      );
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    a.download = `terrain-${seedUsed}.svg`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
 
   document.addEventListener('keydown', (e) => {

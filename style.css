@@ -133,6 +133,7 @@ button:disabled { opacity: 0.45; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
 button.primary:hover { filter: brightness(1.1); }
 button.wide { width: 100%; }
+.save-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
 input[type="number"], input[type="text"], select, textarea {
   font: inherit;
