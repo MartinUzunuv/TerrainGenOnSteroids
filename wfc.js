@@ -203,7 +203,25 @@
     });
 
     const climate = compileClimates(config.climates, kinds, T, resolve);
-    return { types, allowed, weight, near, continent, kinds, climate };
+
+    // typeDist[a*T + b]: how many neighbour steps apart two types are (mountain → forest → grass
+    // → sand = 3). The brush uses it to change cells as little as possible.
+    const typeDist = new Uint8Array(T * T).fill(255);
+    for (let a = 0; a < T; a++) {
+      typeDist[a * T + a] = 0;
+      const queue = [a];
+      for (let qi = 0; qi < queue.length; qi++) {
+        const u = queue[qi];
+        for (let v = 0; v < T; v++) {
+          if ((allowed[u] >>> v) & 1 && typeDist[a * T + v] === 255) {
+            typeDist[a * T + v] = typeDist[a * T + u] + 1;
+            queue.push(v);
+          }
+        }
+      }
+    }
+
+    return { types, allowed, weight, near, continent, kinds, climate, typeDist };
   }
 
   class Solver {
@@ -224,6 +242,7 @@
       this.rng = makeRng(opts.seed);
       this.full = this.T === 32 ? 0xffffffff : 2 ** this.T - 1;
 
+      this.radius2 = Math.max(1, Math.floor(opts.radius2) || 1);
       const offsets = neighborOffsets(opts.radius2);
       this.DX = Int32Array.from(offsets, (o) => o[0]);
       this.DY = Int32Array.from(offsets, (o) => o[1]);
@@ -235,6 +254,7 @@
 
       this.dom = new Uint32Array(this.N);
       this.locked = new Uint8Array(this.N); // 1 = type was picked at random (not forced by neighbours)
+      this.pinned = new Uint8Array(this.N); // 1 = painted with the brush: never changed by the solver
       this.pos = new Int32Array(this.N);
       this.queue = new Int32Array(this.N);
       this.inQueue = new Uint8Array(this.N);
@@ -362,6 +382,13 @@
           for (let z = 0; z < Z; z++) f += climShare[c * Z + z] * typeMult[z * T + t];
           w *= this.climStrength === 1 ? f : Math.pow(f, this.climStrength);
         }
+        // Brush: a cell reopened around new paint keeps its old type wherever the rules allow, and
+        // otherwise takes the type nearest to it (×1000 per step closer), so the change around
+        // the paint is as small as the rules allow.
+        if (this.prefer && this.prefer[c] >= 0) {
+          const steps = Math.min(6, this.rules.typeDist[this.prefer[c] * T + t]);
+          w *= Math.pow(1000, 2 - steps);
+        }
         // Stability: the more settled neighbours already have this type, the likelier it gets.
         // The weight is multiplied by e^(stability × share of settled neighbours with this type),
         // so at full agreement strength 3 gives ×20 and strength 10 gives ×22 000.
@@ -403,6 +430,7 @@
       let changed = 0;
       for (let i = 0; i < N; i++) {
         const c = order[i];
+        if (this.pinned[c]) continue; // never clean up what the user painted
         const t = this.typeAt(c);
         const x = c % W;
         const y = (c / W) | 0;
@@ -436,6 +464,110 @@
       }
       this.cleaned += changed;
       return changed;
+    }
+
+    // ---- brush ----------------------------------------------------------------
+
+    // Paints `cells` with type t and pins them, then reopens the smallest margin around them that
+    // lets the rules fit, so only what has to change changes: water painted into a mountain gets
+    // rings of sand, grass and forest, and the rest of the mountain stays. Reopened cells strongly
+    // prefer their old type when refilled. As a last resort earlier paint in the margin may change
+    // too. Afterwards status is 'running' until step() has refilled the margin.
+    // Returns false (map unchanged, reason in this.message) if the type can't fit there at all.
+    paint(cells, t) {
+      if (this.status !== 'done' || !cells.length) return false;
+      const maxMargin = 4 * (2 * Math.ceil(Math.sqrt(this.radius2)) + 2);
+      const { dist, queue } = this._paintDistances(cells, maxMargin + 1);
+      if (!this.prefer) this.prefer = new Int16Array(this.N).fill(-1);
+      for (const c of queue) this.prefer[c] = this.typeAt(c);
+
+      const margins = [];
+      for (let m = 0; m <= maxMargin; m = m < 4 ? m + 1 : Math.ceil(m * 1.35)) margins.push(m);
+      const oldPaintNearby = queue.some((c) => dist[c] > 0 && this.pinned[c]);
+      const snap = this.snapshot();
+      for (const freeOldPaint of oldPaintNearby ? [false, true] : [false]) {
+        for (const margin of margins) {
+          if (this._tryPaint(cells, t, dist, queue, margin, freeOldPaint)) {
+            this.status = this.open > 0 ? 'running' : 'done';
+            return true;
+          }
+          this.restore(snap);
+        }
+      }
+      this.message = `${this.rules.types[t].name} can't fit there: its neighbour rules clash with what's around it.`;
+      return false;
+    }
+
+    // Distance of every cell from the paint in 8-neighbour steps, up to `limit`. `queue` lists the
+    // reached cells nearest first.
+    _paintDistances(cells, limit) {
+      const { W, H, N } = this;
+      const dist = this.paintDist || (this.paintDist = new Int16Array(N));
+      dist.fill(-1);
+      const queue = [];
+      for (const c of cells) {
+        if (dist[c] < 0) {
+          dist[c] = 0;
+          queue.push(c);
+        }
+      }
+      for (let qi = 0; qi < queue.length; qi++) {
+        const c = queue[qi];
+        const d = dist[c];
+        if (d >= limit) continue;
+        const x = c % W;
+        const y = (c / W) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= H) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            let nx = x + dx;
+            if (nx < 0 || nx >= W) {
+              if (!this.wrapX) continue;
+              nx += nx < 0 ? W : -W;
+            }
+            const n = ny * W + nx;
+            if (dist[n] < 0) {
+              dist[n] = d + 1;
+              queue.push(n);
+            }
+          }
+        }
+      }
+      return { dist, queue };
+    }
+
+    // One attempt: paint, reopen everything within `margin`, and check the rules still fit.
+    _tryPaint(cells, t, dist, queue, margin, freeOldPaint) {
+      const { locked, pinned, dom, full } = this;
+      const mask = bit(t);
+      for (const c of queue) {
+        const d = dist[c];
+        if (d > margin + 1) break; // nearest first, so nothing further is involved
+        if (d === 0) {
+          pinned[c] = 1;
+          locked[c] = 1;
+          if (dom[c] !== mask) this._write(c, mask);
+        } else if (d <= margin && (!pinned[c] || freeOldPaint)) {
+          pinned[c] = 0;
+          locked[c] = 0;
+          if (dom[c] !== full) this._write(c, full);
+        }
+        this._enqueue(c); // the ring just outside the margin stays as it is and constrains it
+      }
+      return this._propagate();
+    }
+
+    snapshot() {
+      return { dom: this.dom.slice(), locked: this.locked.slice(), pinned: this.pinned.slice(), status: this.status };
+    }
+
+    restore(s) {
+      while (this.qLen > 0) this.inQueue[this.queue[--this.qLen]] = 0;
+      for (let c = 0; c < this.N; c++) if (this.dom[c] !== s.dom[c]) this._write(c, s.dom[c]);
+      this.locked.set(s.locked);
+      this.pinned.set(s.pinned);
+      this.status = s.status;
     }
 
     // Forces a full redraw on the next consumeDirty (e.g. after a colour change).
@@ -578,9 +710,9 @@
       this.contNeutral = Math.exp(strength / K);
     }
 
-    // Everything back into full superposition.
+    // Everything back into full superposition, except painted cells.
     _reset() {
-      this.locked.fill(0);
+      this.locked.set(this.pinned);
       this._relaxBox(0, 0, this.W - 1, this.H - 1);
       this.status = this._propagate() ? 'running' : 'failed';
       if (this.status === 'running' && this.open === 0) this.status = 'done';
@@ -639,7 +771,10 @@
         const x1 = Math.min(this.W - 1, cx + r);
         const y1 = Math.min(this.H - 1, cy + r);
         for (let y = y0; y <= y1; y++) {
-          for (let x = x0; x <= x1; x++) this.locked[y * this.W + x] = 0;
+          for (let x = x0; x <= x1; x++) {
+            const c = y * this.W + x;
+            if (!this.pinned[c]) this.locked[c] = 0; // painted cells stay
+          }
         }
         this.lastRepair = center;
         this.lastRadius = r;

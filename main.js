@@ -44,6 +44,13 @@
     height3d: $('height3d'),
     height3dOut: $('height3dOut'),
     canvasWrap: document.querySelector('.canvas-wrap'),
+    brushOn: $('brushOn'),
+    brushType: $('brushType'),
+    brushSwatch: $('brushSwatch'),
+    brushSize: $('brushSize'),
+    brushSizeOut: $('brushSizeOut'),
+    brushCursor: $('brushCursor'),
+    undo: $('undo'),
     jitter: $('jitter'),
     jitterOut: $('jitterOut'),
     types: $('types'),
@@ -232,6 +239,7 @@
     kindEditor.render();
     climateEditor.render();
     updateAddButton();
+    updateBrushTypes();
     compileAndGenerate();
     return true;
   }
@@ -285,6 +293,7 @@
       save();
       if (kind === 'structure') updateAddButton();
       if (kind === 'structure' || kind === 'label') climateEditor.render(); // zones list type names
+      updateBrushTypes();
       if (kind === 'label') {
         if (rules && rules.types.length === config.types.length) {
           config.types.forEach((t, i) => (rules.types[i].name = t.name));
@@ -361,6 +370,8 @@
     if (!rules) return;
     stop();
     if (solverError) showError('');
+    undoStack.length = 0; // brush strokes belong to the old map
+    brush.painting = false;
     const sphere = ui.shape.value === 'sphere';
     const width = readInt(ui.width, 5, 1000, 160);
     if (sphere) ui.height.value = Math.max(5, Math.round(width / 2)); // a globe's map is 2:1
@@ -709,6 +720,7 @@
     }
     ui.resetCamera.disabled = !view;
     ui.height3d.disabled = !view;
+    updateBrushControls(); // the brush only works on the 2D map
     updateHover();
   }
 
@@ -787,7 +799,9 @@
       return;
     }
     if (!solver || hoverCell < 0 || hoverCell >= solver.N) {
-      el.textContent = HOVER_HINT;
+      el.textContent = ui.brushOn.checked
+        ? 'Brush: drag on the map to paint, right-click a cell to pick up its type, Ctrl+Z to undo.'
+        : HOVER_HINT;
       return;
     }
     const x = hoverCell % solver.W;
@@ -819,24 +833,199 @@
     );
   }
 
-  ui.canvas.addEventListener('mousemove', (e) => {
-    if (!solver) return;
+  // The cell under the mouse: with Voronoi shapes, the cell whose region it's in.
+  function cellAt(e) {
     const r = ui.canvas.getBoundingClientRect();
     const fx = (e.clientX - r.left) / r.width;
     const fy = (e.clientY - r.top) / r.height;
-    if (fx < 0 || fy < 0 || fx >= 1 || fy >= 1) {
-      hoverCell = -1;
-    } else if (vor) {
-      hoverCell = vor.owner[Math.floor(fy * vor.h) * vor.w + Math.floor(fx * vor.w)]; // the cell whose region is under the mouse
-    } else {
-      hoverCell = Math.floor(fy * solver.H) * solver.W + Math.floor(fx * solver.W);
-    }
+    if (fx < 0 || fy < 0 || fx >= 1 || fy >= 1) return -1;
+    if (vor) return vor.owner[Math.floor(fy * vor.h) * vor.w + Math.floor(fx * vor.w)];
+    return Math.floor(fy * solver.H) * solver.W + Math.floor(fx * solver.W);
+  }
+
+  ui.canvas.addEventListener('mousemove', (e) => {
+    if (!solver) return;
+    hoverCell = cellAt(e);
+    moveBrushCursor(e);
+    if (brush.painting && hoverCell >= 0) paintStroke(hoverCell);
     updateHover();
   });
   ui.canvas.addEventListener('mouseleave', () => {
     hoverCell = -1;
+    ui.brushCursor.hidden = true;
     updateHover();
   });
+
+  // ---- brush ------------------------------------------------------------------
+  // Paints terrain onto a finished map. Painted cells are pinned; the solver reopens a margin
+  // around them and the generator refills it so the surroundings adjust to fit.
+
+  const brush = { painting: false, last: -1, stroke: null, changed: false };
+  const undoStack = [];
+  const MAX_UNDO = 30;
+
+  function brushType() {
+    return rules ? rules.types.findIndex((t) => t.id === ui.brushType.value) : -1;
+  }
+
+  // Keeps the type picker in step with the type list (names, colours, added / deleted types).
+  function updateBrushTypes() {
+    if (!config) return;
+    const current = ui.brushType.value;
+    ui.brushType.textContent = '';
+    for (const t of config.types) {
+      const o = document.createElement('option');
+      o.value = t.id;
+      o.textContent = t.name;
+      ui.brushType.append(o);
+    }
+    const keep = config.types.some((t) => t.id === current) ? current : (config.types.find((t) => t.id === 'water') || config.types[0]).id;
+    ui.brushType.value = keep;
+    updateBrushSwatch();
+  }
+
+  function updateBrushSwatch() {
+    const t = config && config.types.find((o) => o.id === ui.brushType.value);
+    ui.brushSwatch.style.background = t ? t.color : 'transparent';
+  }
+
+  function updateBrushControls() {
+    const on = ui.brushOn.checked && !view;
+    ui.canvasWrap.classList.toggle('brushing', on);
+    ui.brushSizeOut.textContent = ui.brushSize.value;
+    ui.undo.disabled = undoStack.length === 0 || !!view;
+    ui.brushOn.disabled = !!view;
+    ui.brushOn.parentElement.title = view ? 'The brush works in the 2D view' : 'Paint terrain onto the map (B)';
+    if (!on) ui.brushCursor.hidden = true;
+  }
+
+  function moveBrushCursor(e) {
+    if (!ui.brushOn.checked || view || !solver) {
+      ui.brushCursor.hidden = true;
+      return;
+    }
+    const r = ui.canvas.getBoundingClientRect();
+    const size = (r.width / solver.W) * (2 * Number(ui.brushSize.value) + 1);
+    Object.assign(ui.brushCursor.style, { left: `${e.clientX}px`, top: `${e.clientY}px`, width: `${size}px`, height: `${size}px` });
+    ui.brushCursor.hidden = false;
+  }
+
+  // Cells within the brush radius of a centre cell (round brush, wraps on a sphere).
+  function brushDisc(center, out) {
+    const { W, H } = solver;
+    const r = Number(ui.brushSize.value);
+    const cx = center % W;
+    const cy = (center / W) | 0;
+    for (let dy = -r; dy <= r; dy++) {
+      const y = cy + dy;
+      if (y < 0 || y >= H) continue;
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r + r) continue;
+        let x = cx + dx;
+        if (x < 0 || x >= W) {
+          if (!solver.wrapX) continue;
+          x = (x + W) % W;
+        }
+        out.add(y * W + x);
+      }
+    }
+  }
+
+  function startStroke(cell) {
+    if (!solver || brushType() < 0) return;
+    if (solver.status !== 'done') {
+      showError('Let the map finish generating before painting.');
+      return;
+    }
+    if (solverError) showError('');
+    undoStack.push(solver.snapshot());
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    brush.painting = true;
+    brush.changed = false;
+    brush.stroke = new Set();
+    brush.last = -1;
+    paintStroke(cell);
+  }
+
+  // Paints from the last stroke position to `cell`, stamping the brush along the way so fast
+  // mouse moves don't leave gaps.
+  function paintStroke(cell) {
+    const t = brushType();
+    if (t < 0) return;
+    const { W } = solver;
+    const cells = new Set();
+    const x1 = cell % W;
+    const y1 = (cell / W) | 0;
+    if (brush.last < 0) {
+      brushDisc(cell, cells);
+    } else {
+      const x0 = brush.last % W;
+      const y0 = (brush.last / W) | 0;
+      let dx = x1 - x0;
+      if (solver.wrapX && Math.abs(dx) > W / 2) dx -= Math.sign(dx) * W; // the short way round
+      const n = Math.max(Math.abs(dx), Math.abs(y1 - y0), 1);
+      for (let i = 1; i <= n; i++) {
+        const x = (Math.round(x0 + (dx * i) / n) + W) % W;
+        const y = Math.round(y0 + ((y1 - y0) * i) / n);
+        brushDisc(y * W + x, cells);
+      }
+    }
+    brush.last = cell;
+    // Only cells this stroke hasn't painted yet: re-painting would reshuffle their surroundings.
+    const fresh = [...cells].filter((c) => !brush.stroke.has(c));
+    if (!fresh.length) return;
+    if (!solver.paint(fresh, t)) {
+      showError(solver.message);
+      return;
+    }
+    for (const c of fresh) brush.stroke.add(c);
+    brush.changed = true;
+    while (solver.step() === 'running'); // the reopened margin is small: refill it right away
+    draw();
+  }
+
+  function endStroke() {
+    if (!brush.painting) return;
+    brush.painting = false;
+    if (!brush.changed) undoStack.pop(); // nothing happened: don't keep an empty undo step
+    updateBrushControls();
+  }
+
+  function undo() {
+    if (!solver || !undoStack.length || view) return;
+    solver.restore(undoStack.pop());
+    draw();
+    updateBrushControls();
+  }
+
+  ui.canvas.addEventListener('mousedown', (e) => {
+    if (!ui.brushOn.checked || view || e.button !== 0) return;
+    e.preventDefault();
+    const cell = cellAt(e);
+    if (cell >= 0) startStroke(cell);
+  });
+  window.addEventListener('mouseup', endStroke);
+  // Right-click picks up the type under the cursor.
+  ui.canvas.addEventListener('contextmenu', (e) => {
+    if (!ui.brushOn.checked || !solver) return;
+    e.preventDefault();
+    const t = solver.typeAt(cellAt(e));
+    if (t >= 0) {
+      ui.brushType.value = rules.types[t].id;
+      updateBrushSwatch();
+      updateHover();
+    }
+  });
+  ui.brushOn.addEventListener('change', () => {
+    updateBrushControls();
+    updateHover();
+  });
+  ui.brushType.addEventListener('change', () => {
+    updateBrushSwatch();
+    updateHover();
+  });
+  ui.brushSize.addEventListener('input', updateBrushControls);
+  ui.undo.addEventListener('click', undo);
 
   // ---- controls ------------------------------------------------------------------
 
@@ -1037,10 +1226,21 @@
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
-    if (t.closest && t.closest('input, textarea, select')) return;
-    if (e.key === 'g' || e.key === 'G') generate();
+    // Leave keys alone while typing in a text or number field.
+    if (t.matches && t.matches('input[type="text"], input[type="number"], textarea')) return;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      undo();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (t.closest && t.closest('select')) return; // letters pick options in a dropdown
+    if (e.key === 'b' || e.key === 'B') {
+      ui.brushOn.checked = !ui.brushOn.checked && !view;
+      updateBrushControls();
+      updateHover();
+    } else if (e.key === 'g' || e.key === 'G') generate();
     else if (e.key === 's' || e.key === 'S') stepOnce();
     else if (e.key === 'c' || e.key === 'C') cleanupOnce();
     else if (e.key === ' ' && !(t.closest && t.closest('button, summary, label'))) {
@@ -1056,6 +1256,7 @@
   updateTextureLabel();
   updateHeightLabel();
   updateShapeControls();
+  updateBrushControls();
   ui.resetCamera.disabled = true;
   ui.height3d.disabled = true;
   updateRadiusLabel();

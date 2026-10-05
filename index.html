@@ -21,6 +21,17 @@
       <div class="canvas-wrap">
         <canvas id="map" aria-label="Generated terrain map"></canvas>
       </div>
+      <div class="toolbar">
+        <label class="check"><input id="brushOn" type="checkbox"> Brush <kbd>B</kbd></label>
+        <span class="swatch" id="brushSwatch"></span>
+        <select id="brushType" aria-label="Terrain type to paint"></select>
+        <label class="tool-size">Size
+          <input id="brushSize" type="range" min="0" max="12" step="1" value="2">
+          <output id="brushSizeOut"></output>
+        </label>
+        <button id="undo" type="button" title="Undo the last stroke (Ctrl+Z)" disabled>Undo</button>
+      </div>
+      <div id="brushCursor" hidden></div>
       <div class="hover" id="hover">Hover over a cell to see what it can still become.</div>
     </section>
 
