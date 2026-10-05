@@ -68,6 +68,10 @@
     error: $('error'),
     savePng: $('savePng'),
     saveSvg: $('saveSvg'),
+    preset: $('preset'),
+    presetDesc: $('presetDesc'),
+    statusLine: $('statusLine'),
+    tabs: [...document.querySelectorAll('.tabs [role="tab"]')],
   };
   const ctx = ui.canvas.getContext('2d');
   const HOVER_HINT = 'Hover over a cell to see what it can still become.';
@@ -268,11 +272,18 @@
     generate();
   }
 
+  async function fetchDefaults() {
+    const res = await fetch('tiles.json', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
   async function loadDefaults() {
     try {
-      const res = await fetch('tiles.json', { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (useConfig(await res.json())) save();
+      if (useConfig(await fetchDefaults())) {
+        setPreset('earth');
+        save();
+      }
     } catch (err) {
       showError(
         `Couldn't load tiles.json (${err.message}).\n` +
@@ -292,6 +303,7 @@
     getConfig: () => config,
     onChange(kind) {
       save();
+      setPreset(null); // edited by hand: no longer a preset
       if (kind === 'structure') updateAddButton();
       if (kind === 'structure' || kind === 'label') climateEditor.render(); // zones list type names
       updateBrushTypes();
@@ -323,6 +335,7 @@
     getConfig: () => config,
     onChange(kind) {
       save();
+      setPreset(null); // edited by hand: no longer a preset
       editor.render(); // the types' kind dropdowns list these kinds
       climateEditor.render(); // and so do the zones' multipliers
       if (kind === 'kind-label') {
@@ -341,6 +354,7 @@
     getConfig: () => config,
     onChange(kind) {
       save();
+      setPreset(null); // edited by hand: no longer a preset
       if (kind === 'label') {
         // Zone names only show up in the hover text: update in place, no new map.
         if (rules && rules.climate.zones.length === config.climates.length) {
@@ -790,6 +804,16 @@
       if (cls) dd.className = cls;
       ui.stats.append(dt, dd);
     }
+
+    // One-line summary in the action bar; the full table opens under it.
+    const dot = document.createElement('span');
+    dot.className = `dot ${paused && running ? 'paused' : s.status}`;
+    const pct = Math.floor((s.settled / s.N) * 100);
+    ui.statusLine.textContent = '';
+    ui.statusLine.append(
+      dot,
+      `${statusText}${running ? ` ${pct}%` : ''} · ${s.W}×${s.H} · seed ${seedUsed} · ${(solveMs / 1000).toFixed(2)} s`
+    );
     if (s.status === 'failed') showError(s.message, true);
   }
 
@@ -1202,7 +1226,10 @@
       showError(`${file.name} isn't valid JSON: ${err.message}`);
       return;
     }
-    if (useConfig(raw)) save();
+    if (useConfig(raw)) {
+      setPreset(null);
+      save();
+    }
   });
 
   ui.resetTypes.addEventListener('click', () => {
@@ -1297,7 +1324,134 @@
     }
   });
 
+  // ---- presets ------------------------------------------------------------------
+  // A preset rebuilds the terrain types, kinds and zones from tiles.json plus its own changes
+  // (presets.js) and sets the generation settings. Editing any of those by hand makes it "Custom".
+
+  const PRESETS = window.TerrainPresets.LIST;
+  const PRESET_KEY = 'terrain-generator.preset';
+  let presetId = null;
+  try {
+    presetId = localStorage.getItem(PRESET_KEY);
+  } catch (_) {
+    // storage unavailable
+  }
+
+  function setPreset(id) {
+    presetId = id;
+    try {
+      if (id) localStorage.setItem(PRESET_KEY, id);
+      else localStorage.removeItem(PRESET_KEY);
+    } catch (_) {
+      // storage unavailable
+    }
+    renderPresetSelect();
+  }
+
+  function renderPresetSelect() {
+    ui.preset.textContent = '';
+    const add = (value, label) => {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = label;
+      ui.preset.append(o);
+    };
+    if (!presetId) add('', 'Custom (your edits)');
+    for (const p of PRESETS) add(p.id, p.name);
+    ui.preset.value = presetId || '';
+    const p = PRESETS.find((o) => o.id === presetId);
+    ui.presetDesc.textContent = p
+      ? p.description
+      : 'Your own terrain types, kinds and zones. Pick a preset to start again from a ready-made world.';
+  }
+
+  // Puts a preset's generation settings into the sidebar controls.
+  function applySettings(s) {
+    const r = RADIUS_STEPS.findIndex((o) => o.radius2 === s.radius2);
+    ui.radius.value = r >= 0 ? r : 1;
+    ui.stability.checked = s.stability > 0;
+    if (s.stability > 0) ui.stabilityStrength.value = Math.round(Math.sqrt(300 * s.stability));
+    ui.continents.checked = !!s.continents;
+    if (s.continents) {
+      ui.contPoints.value = s.continents.points;
+      ui.contStrength.value = s.continents.strength;
+    }
+    ui.climate.checked = !!s.climate;
+    if (s.climate) {
+      ui.climStrength.value = s.climate.strength;
+      ui.climLayout.value = s.climate.layout;
+    }
+    ui.cleanupPasses.value = s.cleanup;
+    updateRadiusLabel();
+    updateStabilityLabel();
+    updateContinentLabels();
+    updateClimateLabels();
+  }
+
+  async function applyPreset(id) {
+    const p = PRESETS.find((o) => o.id === id);
+    if (!p) return;
+    if (!presetId && config && !confirm(`Switch to "${p.name}"? It replaces your edited terrain types, continental kinds and climate zones.`)) {
+      renderPresetSelect();
+      return;
+    }
+    let defaults;
+    try {
+      defaults = await fetchDefaults();
+    } catch (err) {
+      showError(`Couldn't load tiles.json (${err.message}).`);
+      renderPresetSelect();
+      return;
+    }
+    applySettings(p.settings);
+    if (useConfig(window.TerrainPresets.build(defaults, p))) {
+      setPreset(p.id);
+      save();
+    }
+  }
+
+  ui.preset.addEventListener('change', () => {
+    if (ui.preset.value) applyPreset(ui.preset.value);
+  });
+
+  // ---- tabs ------------------------------------------------------------------
+
+  const TAB_KEY = 'terrain-generator.tab';
+
+  function selectTab(tab, focus) {
+    for (const t of ui.tabs) {
+      const on = t === tab;
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+      $(t.getAttribute('aria-controls')).hidden = !on;
+    }
+    if (focus) tab.focus();
+    try {
+      localStorage.setItem(TAB_KEY, tab.id);
+    } catch (_) {
+      // storage unavailable: the tab just isn't remembered
+    }
+  }
+
+  ui.tabs.forEach((tab, i) => {
+    tab.addEventListener('click', () => selectTab(tab));
+    tab.addEventListener('keydown', (e) => {
+      const d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      e.preventDefault();
+      selectTab(ui.tabs[(i + d + ui.tabs.length) % ui.tabs.length], true);
+    });
+  });
+
   // ---- start ------------------------------------------------------------------
+
+  renderPresetSelect();
+  try {
+    const remembered = ui.tabs.find((t) => t.id === localStorage.getItem(TAB_KEY));
+    if (remembered) selectTab(remembered);
+  } catch (_) {
+    // storage unavailable
+  }
 
   updateSpeedLabel();
   updateJitterLabel();
